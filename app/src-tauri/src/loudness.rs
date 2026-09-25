@@ -48,6 +48,10 @@ const MAX_TRIM_MS: i64 = 12_000;
 pub struct Analysis {
     /// Integrated loudness, LUFS.
     pub lufs: f64,
+    /// Loudest sample over all channels, dBFS. Sample peak and not true peak:
+    /// true peak oversamples 4x, which on the phone is minutes more per
+    /// library; `db::PEAK_CEILING_DB` leaves the margin instead.
+    pub peak_db: f64,
     /// Absolute ms where the audio starts.
     pub lead_ms: i64,
     /// Absolute ms where the audio ends. Absolute, not "silence from the
@@ -127,7 +131,7 @@ pub fn measure(path: &Path) -> Option<Analysis> {
             if channels == 0 || rate == 0 {
                 return None;
             }
-            meter = Some(ebur128::EbuR128::new(channels as u32, rate, ebur128::Mode::I).ok()?);
+            meter = Some(ebur128::EbuR128::new(channels as u32, rate, ebur128::Mode::I | ebur128::Mode::SAMPLE_PEAK).ok()?);
         }
         interleave(&decoded, &mut buf);
         if buf.is_empty() {
@@ -148,6 +152,12 @@ pub fn measure(path: &Path) -> Option<Analysis> {
         _ => return None,
     };
 
+    let peak = (0..channels as u32)
+        .filter_map(|c| meter.sample_peak(c).ok())
+        .fold(0.0f64, f64::max);
+    // Digital silence has no level; the floor stands in for it.
+    let peak_db = if peak > 0.0 { 20.0 * peak.log10() } else { -120.0 };
+
     let to_ms = |f: i64| (f * 1000) / rate as i64;
     let total_ms = to_ms(frames);
     // A file with nothing above the floor anywhere: leave both edges alone
@@ -161,7 +171,7 @@ pub fn measure(path: &Path) -> Option<Analysis> {
             (lead, total_ms - trail)
         }
     };
-    Some(Analysis { lufs, lead_ms, audio_end_ms })
+    Some(Analysis { lufs, peak_db, lead_ms, audio_end_ms })
 }
 
 /// Flattens one decoded packet into interleaved f32 in `out`.
@@ -358,6 +368,7 @@ impl Analyzer {
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
             let done = run_sweep(&app);
+            crate::sync_notice::analysis_end(&app);
             // A background job with no trace is a job nobody can tell is
             // broken. This project has been bitten by exactly that before.
             if done > 0 {
@@ -392,6 +403,14 @@ fn run_sweep(app: &AppHandle) -> usize {
         log::info!("[analysis] measuring {} track(s)", batch.len());
 
         for (id, path) in batch {
+            // Files moving between devices come first: decoding a whole
+            // track per iteration next to a transfer is CPU and disk the
+            // transfer needed, and on the phone part of the lag (1.2). The
+            // sweep was kicked by that same sync's `library-changed`; it
+            // just waits here and picks up where it was once the run ends.
+            while crate::sync_notice::busy(app) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
             // Decoding happens with NO database lock held. Same rule the hash
             // backfill learned the hard way: holding the lock across file I/O
             // freezes every screen that needs to read.
@@ -399,14 +418,14 @@ fn run_sweep(app: &AppHandle) -> usize {
             let state = app.state::<crate::AppState>();
             let Ok(conn) = state.db.lock() else { return done };
             let saved = match measured {
-                Some(a) => db::set_track_analysis(&conn, id, a.lufs, a.lead_ms, a.audio_end_ms),
+                Some(a) => db::set_track_analysis(&conn, id, a.lufs, a.peak_db, a.lead_ms, a.audio_end_ms),
                 // A file that can't be measured is written at the reference
                 // level with no trim, i.e. "needs no correction". Leaving it
                 // NULL would put it back in the queue on every startup and
                 // re-decode a broken file forever.
                 None => {
                     log::info!("[analysis] {path} not measurable, left at reference level");
-                    db::set_track_analysis(&conn, id, db::TARGET_LUFS, 0, 0)
+                    db::set_track_analysis(&conn, id, db::TARGET_LUFS, db::PEAK_CEILING_DB, 0, 0)
                 }
             };
             if let Err(e) = saved {
@@ -416,6 +435,12 @@ fn run_sweep(app: &AppHandle) -> usize {
             let pending = db::analysis_pending_count(&conn).unwrap_or(0);
             drop(conn);
             let _ = app.emit("loudness-progress", Progress { pending });
+            // On Android, the same notification (and foreground service) as a
+            // sync: measuring a whole library after "Rescan" takes minutes,
+            // and nothing said so outside the Settings screen. The total
+            // follows what's still pending, which grows if tracks keep
+            // arriving mid-sweep.
+            crate::sync_notice::analysis(app, done as u32, done as u32 + pending.max(0) as u32);
         }
     }
 }

@@ -24,6 +24,25 @@ const COMMANDS: &[&str] = &[
     "set_crossfade",
     "list_output_devices",
     "set_output_device",
+    // Battery-optimization exemption (Fase 1.3). Not audio-specific, but this
+    // is the only Android plugin Sway has wired up, and it exists for the
+    // same reason as everything else here: without it Android can freeze or
+    // kill the process this plugin's foreground service runs in, which is
+    // what silently drops transport buttons pressed after that point — see
+    // `NativeAudioRuntime.transport` on the Kotlin side.
+    "is_ignoring_battery_optimizations",
+    "request_ignore_battery_optimizations",
+    // Native play queue (Fase 1.7): the player owns next/previous/end of
+    // track, so a button pressed with the app off screen or after the
+    // process was killed doesn't depend on JS.
+    "set_queue",
+    // Stop from the app or the notification (Fase 3.3): the player owns it
+    // like it owns the queue.
+    "stop",
+    "set_queue_mode",
+    "queue_next",
+    "queue_prev",
+    "restore_queue",
 ];
 
 fn main() {

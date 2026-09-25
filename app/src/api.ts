@@ -109,7 +109,31 @@ const desktopSetVolume = (volume: number) => invoke<void>('set_volume', { volume
 // stays null there and the app falls back to the usual position polling.
 export type { PlaybackEvent } from './nativeAudio';
 export const subscribePlayback = android ? nativeAudio.subscribePlayback : null;
+/// Android only: the desktop player lives in Rust and outlives the webview.
+export const restorePlayback = android ? nativeAudio.restorePlayback : null;
+
+/// Android only (Fase 1.7): the player owns the play queue. `null` on desktop,
+/// where the queue stays in App.tsx — the Rust player there shares its
+/// process with the window, so it never runs without the app.
+export const nativeQueue = android
+  ? {
+      play: nativeAudio.playQueue,
+      update: nativeAudio.updateQueue,
+      setMode: nativeAudio.setQueueMode,
+      next: nativeAudio.nextTrack,
+      prev: nativeAudio.prevTrack,
+    }
+  : null;
 export const setAppVisible = nativeAudio.setAppVisible;
+
+/// Fase 1.3, Android only: whether Sway is exempt from battery optimization,
+/// and a way to ask for it. `null` on desktop — there is no such thing there.
+export const isIgnoringBatteryOptimizations = android
+  ? nativeAudio.isIgnoringBatteryOptimizations
+  : null;
+export const requestIgnoreBatteryOptimizations = android
+  ? nativeAudio.requestIgnoreBatteryOptimizations
+  : null;
 
 export const playTrack = android ? nativeAudio.playTrack : desktopPlayTrack;
 export const pausePlayback = android ? nativeAudio.pausePlayback : desktopPausePlayback;
@@ -222,10 +246,6 @@ export const loudnessPending = () => invoke<number>('loudness_pending');
 /// Throws away every measurement and re-analyzes the library. Returns how
 /// many tracks that leaves to do.
 export const rescanAnalysis = () => invoke<number>('rescan_analysis');
-
-/// The level normalization aims for. Mirrors `db::TARGET_LUFS`; shown in the
-/// UI so the setting says what it actually does.
-export const TARGET_LUFS = -18;
 
 // Embedded cover art as a data-URL (null if the file has none).
 export const coverThumb = (id: number) => invoke<string | null>('cover_thumb', { id });
@@ -464,6 +484,13 @@ export interface SyncProgress {
   sending: boolean;
 }
 
+/// How far the whole run is, 0-100: finished files plus the part of the
+/// current one. Same measure as Android's notification ("3 of 128").
+export function syncRunPercent(p: SyncProgress): number {
+  const file = p.total > 0 ? Math.min(1, p.done / p.total) : 0;
+  return ((Math.max(0, p.fileIndex - 1) + file) / Math.max(1, p.fileTotal)) * 100;
+}
+
 export interface SyncDone {
   uid: string;
   name: string;
@@ -494,6 +521,11 @@ export interface Scope {
 export const getScope = (deviceUid: string) => invoke<Scope>('get_scope', { deviceUid });
 export const setScopeMode = (deviceUid: string, mode: string) =>
   invoke<void>('set_scope_mode', { deviceUid, mode });
+/// First link of this device (Fase 1.8): it starts with nothing selected and
+/// the Sync screen asks whether to keep everything or chosen playlists.
+export const scopePromptPending = () => invoke<boolean>('scope_prompt_pending');
+export const resolveScopePrompt = (everything: boolean) =>
+  invoke<void>('resolve_scope_prompt', { everything });
 export const setScopeDirection = (deviceUid: string, direction: string) =>
   invoke<void>('set_scope_direction', { deviceUid, direction });
 export const setScopePlaylist = (deviceUid: string, playlistUid: string, selected: boolean) =>

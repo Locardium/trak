@@ -672,7 +672,9 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
   animation: fade-in 150ms var(--ease);
 }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-.modal-backdrop.closing { animation: fade-out 180ms var(--ease) forwards; }
+/* Leaving: it no longer takes clicks. A backdrop stuck in this state (1.9)
+   used to swallow every click on an otherwise invisible screen. */
+.modal-backdrop.closing { animation: fade-out 180ms var(--ease) forwards; pointer-events: none; }
 @keyframes fade-out { from { opacity: 1; } to { opacity: 0; } }
 .modal {
   z-index: var(--z-modal);
@@ -762,6 +764,10 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
   font-size: 12px; margin-bottom: var(--space-sm);
 }
 .import-toast-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.sync-toast-file {
+  font-size: 11px; color: var(--muted); margin-bottom: var(--space-sm);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .import-bar {
   height: 6px; border-radius: 999px;
   background: oklch(100% 0 0 / 0.1); overflow: hidden;
@@ -888,6 +894,16 @@ table.tracks th.col-drop-after { box-shadow: inset -2px 0 0 var(--accent); }
    label keeps the full width. */
 .set-row > :last-child:not(:only-child) { justify-self: end; }
 .set-row:last-child { border-bottom: 0; }
+/* First link of a device: the one question that holds back every file until
+   it's answered, so it stands out from the settings around it. */
+.scope-prompt {
+  border: 1px solid var(--accent-dim);
+  border-radius: 8px;
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-sm);
+}
+.scope-prompt .set-label > span { color: var(--accent); }
+.scope-prompt-actions { display: flex; gap: var(--space-sm); flex-wrap: wrap; justify-content: flex-end; }
 /* Rows that are a form rather than a labelled setting: the fields sit next
    to each other and the action closes the row, instead of a field being
    flung to the far side of the control track.

@@ -38,6 +38,25 @@ export interface NativeAudioState {
   nextTrackId?: number;
   outputDeviceId?: number;
   error?: string;
+  /// Native queue (Fase 1.7). "once" turns itself into "off" in the player,
+  /// on the transition, so the app reads it back from here.
+  repeatMode?: 'off' | 'track' | 'once';
+  /// -1 with no queue.
+  queueIndex?: number;
+  queueLength?: number;
+}
+
+/// One entry of the native queue: what the player needs to play it with no
+/// help from JS — it has to, when the app is off screen or was killed.
+export interface NativeAudioQueueItem {
+  id: number;
+  src: string;
+  title?: string;
+  artist?: string;
+  artwork?: string;
+  gainDb?: number;
+  leadMs?: number;
+  audioEndMs?: number;
 }
 
 export interface NativeAudioSource {
@@ -45,7 +64,8 @@ export interface NativeAudioSource {
   id?: number;
   title?: string;
   artist?: string;
-  artworkUrl?: string;
+  /// Cached cover thumb, a file path. Shown by the notification.
+  artwork?: string;
   /// Per-track level in dB, cut or boost. The cut half rides `ExoPlayer.volume`
   /// and the boost half a `LoudnessEnhancer`, because that volume saturates at
   /// 1.0 — see `applyVolumeLocked` in the plugin.
@@ -83,6 +103,8 @@ export const getState = () => call<NativeAudioState>('get_state');
 export const getProgressCheckpoint = () =>
   call<NativeAudioProgressCheckpoint | null>('get_progress_checkpoint');
 export const clearProgressCheckpoint = () => call<void>('clear_progress_checkpoint');
+/// Stop: the player drops the queue, the checkpoint and the notification.
+export const stop = () => call<void>('stop');
 export const dispose = () => call<void>('dispose');
 
 // --- Added by the fork ------------------------------------------------------
@@ -128,3 +150,49 @@ export const addStateListener = async (
     void listener.unregister();
   };
 };
+
+// --- Battery-optimization exemption (Fase 1.3) ------------------------------
+//
+// Not audio playback per se, but the same reason everything else in this file
+// exists: Android can freeze or kill the process this plugin's foreground
+// service runs in while it's backgrounded and unexempt, and that's what makes
+// the notification / lockscreen / a car's Bluetooth stop advancing tracks
+// until the app is reopened by hand (see `NativeAudioRuntime.transport`).
+
+export const isIgnoringBatteryOptimizations = async (): Promise<boolean> => {
+  const res = await call<{ ignoring: boolean }>('is_ignoring_battery_optimizations');
+  return res.ignoring;
+};
+
+/// Opens the system's own exemption dialog; there's no silent way to ask.
+/// Resolves once the dialog is shown, not once the user answers — the caller
+/// re-reads `isIgnoringBatteryOptimizations` when the app is next in front.
+export const requestIgnoreBatteryOptimizations = () =>
+  call<void>('request_ignore_battery_optimizations');
+
+// --- Native play queue (Fase 1.7) --------------------------------------------
+//
+// The player owns the queue: next/previous/end of track are decided on the
+// native side, so a button pressed with the app off screen (where React stops
+// re-rendering) or after Android killed the process still does the right
+// thing. JS builds the queue and hands it over.
+
+/// `play: true` loads `index` and starts it. `play: false` only replaces the
+/// queue around what is playing (shuffle toggled, levels refreshed).
+export const setQueue = (payload: {
+  items: NativeAudioQueueItem[];
+  index: number;
+  play: boolean;
+  repeat?: string;
+  autoplay?: boolean;
+}) => call<NativeAudioState>('set_queue', payload as unknown as Record<string, unknown>);
+
+export const setQueueMode = (repeat?: string, autoplay?: boolean) =>
+  call<NativeAudioState>('set_queue_mode', { repeat, autoplay });
+
+export const queueNext = () => call<NativeAudioState>('queue_next');
+export const queuePrev = () => call<NativeAudioState>('queue_prev');
+
+/// Reads back the queue an earlier process saved, once per process; in a
+/// fresh one, also loads its current entry, paused where it stopped.
+export const restoreQueue = () => call<NativeAudioState>('restore_queue');

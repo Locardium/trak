@@ -129,7 +129,14 @@ pub enum Msg {
     // would cost 1.33x in base64 or 3-4x as a number array, over gigabytes.
     // The protocol is: BlobStart -> N raw payloads -> BlobEnd.
     /// Request for a file by its hash. `offset` != 0 is a resume.
-    BlobReq { hash: String, offset: u64 },
+    BlobReq {
+        hash: String,
+        offset: u64,
+        /// Position of this file in the requester's run ("3 of 128"), so the
+        /// side serving it shows the same progress.
+        index: usize,
+        of: usize,
+    },
     /// Starts the transfer: `size` is what's left to send from the offset.
     BlobStart { size: u64 },
     /// End of the transfer; `hash` is that of the COMPLETE file, to verify.
@@ -148,6 +155,9 @@ pub enum Msg {
         duration_ms: i64,
         bpm: Option<i64>,
         updated_at: i64,
+        /// Same as in `BlobReq`: position in the pusher's run.
+        index: usize,
+        of: usize,
     },
     /// The other side can't serve what was requested (doesn't have it, can't
     /// read it).
@@ -301,6 +311,25 @@ impl Session {
     pub fn recv(&mut self) -> Result<Msg> {
         let bytes = self.recv_bytes()?;
         Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    /// Whether the other side sent something not yet read, or hung up,
+    /// without blocking. While a person looks at the pairing code the peer
+    /// is expected to stay silent: anything it sends in the meantime (a
+    /// `Reject` because its own dialog was closed, its answer arriving
+    /// first) means the wait is over.
+    pub fn peer_has_spoken(&self) -> bool {
+        if self.stream.set_nonblocking(true).is_err() {
+            return false;
+        }
+        let mut byte = [0u8; 1];
+        let peeked = self.stream.peek(&mut byte);
+        let _ = self.stream.set_nonblocking(false);
+        match peeked {
+            // Ok(0) is a hang-up, Ok(n) is data: both end the wait.
+            Ok(_) => true,
+            Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+        }
     }
 
     /// A logical message goes as a header frame with the total length, then
@@ -519,6 +548,24 @@ mod tests {
         // pinned in `devices`.
         assert_ne!(a.peer_pubkey, b.peer_pubkey);
         assert_eq!(a.peer_pubkey.len(), 32);
+    }
+
+    /// Pairing waits on a person while watching the socket: silence must read
+    /// as "keep waiting", and a message or a hang-up as "stop" — without
+    /// consuming the message, which the caller still has to read.
+    #[test]
+    fn peer_has_spoken_sees_messages_and_hang_ups_without_consuming() {
+        let (mut a, b) = pair();
+        assert!(!a.peer_has_spoken());
+        let mut b = b;
+        b.send(&Msg::Reject { reason: "closed".into() }).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(a.peer_has_spoken());
+        assert!(matches!(a.recv().unwrap(), Msg::Reject { .. }));
+        assert!(!a.peer_has_spoken());
+        drop(b);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(a.peer_has_spoken());
     }
 
     /// Two different sessions have to produce different codes: if the code

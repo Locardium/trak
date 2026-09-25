@@ -5,7 +5,6 @@ import { Modal } from './Modal';
 import { Switch } from './Switch';
 import { formatBytes, formatWhen } from '../format';
 import {
-  confirmPairing,
   connectPeer,
   deviceIdentity,
   freeSpace,
@@ -20,9 +19,12 @@ import {
   type Conditions,
   type SyncLimits,
   refreshPeers,
+  resolveScopePrompt,
+  scopePromptPending,
   setAutoSyncP2p,
   setDeviceName,
   setScopeDirection,
+  syncRunPercent,
   setScopeMode,
   setScopePlaylists,
   storageStatus,
@@ -32,7 +34,6 @@ import {
   unpairDevice,
   type LogEntry,
   type PairingDone,
-  type PairingRequest,
   type Peer,
   type PlaylistNode,
   type Scope,
@@ -103,7 +104,7 @@ function PlanSummary({ ev }: { ev: SyncPlanEvent }) {
 /// Transfer in progress. With 40 MB files over a home network, without
 /// this the app looks frozen.
 function TransferProgress({ p }: { p: SyncProgress }) {
-  const pct = p.total > 0 ? Math.min(100, (p.done / p.total) * 100) : 0;
+  const pct = syncRunPercent(p);
   return (
     <div className="plan">
       <div className="plan-row">
@@ -304,12 +305,15 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
   const [savedName, setSavedName] = useState('');
   const [autoSync, setAutoSync] = useState(true);
   const [peers, setPeers] = useState<Peer[]>([]);
-  const [pairing, setPairing] = useState<PairingRequest | null>(null);
   const [busyPeer, setBusyPeer] = useState<string | null>(null);
   const [plans, setPlans] = useState<Record<string, SyncPlanEvent>>({});
   const [progress, setProgress] = useState<Record<string, SyncProgress>>({});
   const [storage, setStorage] = useState<Storage | null>(null);
   const [myScope, setMyScope] = useState<Scope>({ mode: 'all', direction: 'both', selected: [] });
+  /// First link: this device hasn't said yet what it wants (see
+  /// `resolveScopePrompt`). Its scope already reads "selected, nothing
+  /// marked" meanwhile, so nothing but playlists is coming in.
+  const [scopePrompt, setScopePrompt] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [freeing, setFreeing] = useState(false);
 
@@ -343,7 +347,31 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
 
   const reloadPeers = useCallback(() => {
     listPeers().then(setPeers).catch(() => {});
+    // Every pairing ends up reloading the list, so this is where a first
+    // link shows its question. The scope changed under us too (to
+    // "selected"), so it's read again.
+    scopePromptPending()
+      .then((pending) => {
+        setScopePrompt(pending);
+        if (pending) {
+          return deviceIdentity()
+            .then(([uid]) => getScope(uid))
+            .then(setMyScope);
+        }
+      })
+      .catch(() => {});
   }, []);
+
+  async function answerScopePrompt(everything: boolean) {
+    try {
+      await resolveScopePrompt(everything);
+      setScopePrompt(false);
+      if (myUid) setMyScope(await getScope(myUid));
+      onStatus(everything ? 'Syncing the whole library' : 'Tick the playlists to sync on this device');
+    } catch (e) {
+      onStatus(String(e));
+    }
+  }
 
   /// Storage state is recalculated by walking the library, so it can't run
   /// once per `library-changed`: during a sync those arrive in bunches and
@@ -386,12 +414,10 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
       // `immediate` would skip the debounce exactly during the bursts it
       // exists for.
       listen('library-changed', () => reloadLocal()),
-      listen<PairingRequest>('pairing-request', (e) => setPairing(e.payload)),
-      listen<PairingDone>('pairing-done', (e) => {
-        setPairing(null);
+      // The code itself and the outcome message are PairingDialog's (in
+      // App): a request can arrive while this screen is closed.
+      listen<PairingDone>('pairing-done', () => {
         setBusyPeer(null);
-        const { name, ok, error } = e.payload;
-        onStatus(ok ? `Paired with ${name}` : `${name}: ${error ?? 'pairing failed'}`);
         reloadPeers();
       }),
       listen('peer-hello', () => setBusyPeer(null)),
@@ -401,6 +427,15 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
       }),
       listen<SyncProgress>('sync-progress', (e) => {
         setProgress((p) => ({ ...p, [e.payload.uid]: e.payload }));
+      }),
+      // A run the other device started ends without `sync-done` here.
+      listen<string>('sync-idle', (e) => {
+        setProgress((p) => {
+          if (!(e.payload in p)) return p;
+          const next = { ...p };
+          delete next[e.payload];
+          return next;
+        });
       }),
       listen<SyncDone>('sync-done', (e) => {
         const { uid, name, received, sent, failed, organized, auto, error } = e.payload;
@@ -488,18 +523,6 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
     }
   }
 
-  async function decide(accept: boolean) {
-    if (!pairing) return;
-    const uid = pairing.uid;
-    setPairing(null);
-    if (!accept) setBusyPeer(null);
-    try {
-      await confirmPairing(uid, accept);
-    } catch (e) {
-      onStatus(String(e));
-    }
-  }
-
   /// The checkbox flips instantly and the save happens in the background,
   /// without `await`.
   ///
@@ -556,31 +579,6 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
     } finally {
       setFreeing(false);
     }
-  }
-
-  // The code goes above everything else: it's a security decision and can't
-  // stay hidden behind a scroll.
-  if (pairing) {
-    return (
-      <Modal
-        title={pairing.incoming ? `${pairing.name} wants to pair` : `Pair with ${pairing.name}`}
-        onClose={() => decide(false)}
-      >
-        <div className="pair-dialog">
-          <p className="set-note">
-            Check that this code is showing on <strong>{pairing.name}</strong> too. If the two codes
-            are different, someone else is on the line — reject it.
-          </p>
-          <div className="pair-code">{pairing.code}</div>
-          <div className="pair-actions">
-            <button onClick={() => decide(false)}>Reject</button>
-            <button className="primary" onClick={() => decide(true)}>
-              Codes match
-            </button>
-          </div>
-        </div>
-      </Modal>
-    );
   }
 
   const openPeer = peers.find((p) => p.uid === openUid);
@@ -772,6 +770,21 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
       <div className="settings">
         <section>
           <h4>This device</h4>
+          {scopePrompt && (
+            <div className="set-row scope-prompt">
+              <div className="set-label">
+                <span>What should this device sync?</span>
+                <small>
+                  Playlists from the linked device are coming in now. No music is downloaded until
+                  you choose.
+                </small>
+              </div>
+              <div className="scope-prompt-actions">
+                <button onClick={() => answerScopePrompt(true)}>Everything</button>
+                <button onClick={() => answerScopePrompt(false)}>Choose playlists</button>
+              </div>
+            </div>
+          )}
           <div className="set-row">
             <div className="set-label">
               <span>Name</span>

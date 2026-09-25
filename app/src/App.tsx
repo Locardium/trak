@@ -36,6 +36,10 @@ import {
   revealTrack,
   syncXmlAfterChange,
   watchConditions,
+  getUiSetting,
+  setUiSetting,
+  restorePlayback,
+  nativeQueue,
   type PlaybackPrefs,
 } from './api';
 import { beginDrag, didDrag, DragPayload, RawTarget } from './dnd';
@@ -47,6 +51,8 @@ import PlayerBar, { RepeatMode, REPEAT_LABEL } from './components/PlayerBar';
 import RightPanel from './components/RightPanel';
 import Settings from './components/Settings';
 import Sync from './components/Sync';
+import PairingDialog from './components/PairingDialog';
+import SyncIndicator from './components/SyncIndicator';
 import { Modal, NamePrompt, Confirm } from './components/Modal';
 import { MenuItem } from './components/ContextMenu';
 
@@ -61,6 +67,8 @@ type ModalState =
   | null;
 
 const VOL_STORAGE = 'sway.volume';
+/// ui_setting key for the play queue (JSON array of track ids). Android only.
+const QUEUE_KEY = 'queue';
 /// Before this point in the track, "back" jumps to the previous one instead
 /// of restarting the current one.
 const RESTART_MS = 3000;
@@ -77,7 +85,20 @@ function shuffled<T>(arr: T[]): T[] {
 export default function App() {
   const [library, setLibrary] = useState<Track[]>([]);
   const [nodes, setNodes] = useState<PlaylistNode[]>([]);
-  const [selection, setSelection] = useState<Selection>({ type: 'library' });
+  // Kept in the db on Android: Android may rebuild the WebView or kill the
+  // process while the app is in the background, and coming back to the
+  // library instead of the playlist you were in reads as "the app closed".
+  const [selection, setSelection] = useUiSetting<Selection>(
+    'selection',
+    { type: 'library' },
+    (raw) => {
+      if (raw === 'library') return { type: 'library' };
+      const id = Number(raw);
+      return Number.isInteger(id) && id > 0 ? { type: 'playlist', id } : null;
+    },
+    (s) => (s.type === 'library' ? 'library' : String(s.id)),
+    { enabled: isAndroid(), writeDelayMs: 0 },
+  );
   const [plTracks, setPlTracks] = useState<Track[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState('');
@@ -144,6 +165,13 @@ export default function App() {
   });
   const [status, setStatus] = useState('');
   const queueRef = useRef<number[]>([]);
+  /// Every new queue goes through here so Android can put it back after the
+  /// process is killed (see the restore effect). Written on play/shuffle
+  /// only, not per track, so the size of a queue doesn't matter.
+  function setQueue(ids: number[]) {
+    queueRef.current = ids;
+    if (isAndroid()) setUiSetting(QUEUE_KEY, JSON.stringify(ids)).catch(() => {});
+  }
   const volPending = useRef<number | null>(null);
   // After a seek, ignore the position poll for a bit (prevents the bar from
   // jumping back to the old value before the backend reflects the new position).
@@ -190,6 +218,15 @@ export default function App() {
     applyPlaybackPrefs(prefs).catch((e) => {
       setStatus('Could not apply playback settings: ' + e);
     });
+    // Android: the player keeps each queue entry's level and trim, and both
+    // depend on these preferences (normalize, gapless, crossfade). Never
+    // with an empty queue: at startup that would wipe the one on disk
+    // before the restore below gets to read it.
+    const ids = queueRef.current;
+    const cur = currentIdRef.current;
+    if (nativeQueue && ids.length > 0 && cur != null) {
+      nativeQueue.update(ids, cur, repeatRef.current, prefs.autoplay).catch(() => {});
+    }
   }, [prefs]);
 
   useEffect(() => {
@@ -264,6 +301,15 @@ export default function App() {
         case 'ended':
           onTrackEndedRef.current();
           break;
+        case 'stopped':
+          setCurrentId(null);
+          setPaused(false);
+          setPosMs(0);
+          break;
+        case 'repeat':
+          // "once" consumed by the player (Fase 1.7).
+          setRepeat(e.value);
+          break;
       }
     })
       .then((un) => {
@@ -300,6 +346,49 @@ export default function App() {
     return () => {
       delete w.__swayMediaButton;
       delete w.__swayAppVisible;
+    };
+  }, []);
+
+  // Android: the WebView can start from zero while the player did not — the
+  // Activity was rebuilt, or the process was killed in the background. Either
+  // way React mounts with nothing playing; this puts back the track, its
+  // position and the queue (see `restorePlayback` for the two cases).
+  //
+  // A track the user picked in the meantime wins: the restore is dropped.
+  const currentIdRef = useRef(currentId);
+  currentIdRef.current = currentId;
+  useEffect(() => {
+    if (!restorePlayback) return;
+    const restore = restorePlayback;
+    let alive = true;
+    (async () => {
+      try {
+        const [st, rawQueue] = await Promise.all([
+          restore(),
+          getUiSetting(QUEUE_KEY).catch(() => null),
+        ]);
+        if (!alive || !st || currentIdRef.current != null) return;
+        let q: number[] = [];
+        try {
+          const parsed: unknown = JSON.parse(rawQueue ?? '[]');
+          if (Array.isArray(parsed)) q = parsed.filter((n): n is number => Number.isInteger(n));
+        } catch {}
+        queueRef.current = q.includes(st.id) ? q : [st.id];
+        setCurrentId(st.id);
+        setPaused(!st.playing);
+        setPosMs(st.posMs);
+        // The player had no queue of its own to bring back (first run with
+        // the native queue, or it lost it): give it this one, around the
+        // track it already has loaded, without restarting it.
+        if (nativeQueue && !st.hasQueue) {
+          nativeQueue
+            .update(queueRef.current, st.id, repeatRef.current, prefsRef.current.autoplay)
+            .catch(() => {});
+        }
+      } catch {}
+    })();
+    return () => {
+      alive = false;
     };
   }, []);
 
@@ -546,8 +635,12 @@ export default function App() {
         return;
       }
       try {
-        queueRef.current = buildQueue(visibleTracks.map((t) => t.id), id, shuffle);
-        await startTrack(id);
+        const ids = buildQueue(visibleTracks.map((t) => t.id), id, shuffle);
+        setQueue(ids);
+        // Android: the whole queue goes to the player, which owns it from
+        // here (Fase 1.7). Desktop keeps driving it from this component.
+        if (nativeQueue) await nativeQueue.play(ids, id, repeat, prefs.autoplay);
+        else await startTrack(id);
         setCurrentId(id);
         setPaused(false);
         setPosMs(0);
@@ -555,11 +648,19 @@ export default function App() {
         setStatus('Playback error: ' + e);
       }
     },
-    [visibleTracks, shuffle, startTrack],
+    [visibleTracks, shuffle, startTrack, repeat, prefs.autoplay],
   );
 
   const playOffset = useCallback(
     async (delta: number) => {
+      // Android: the player steps its own queue. It knows the real current
+      // track even when this component hasn't re-rendered — off screen React
+      // doesn't, which is what left "next" reloading the same track — and
+      // the result comes back as an `advanced` event.
+      if (nativeQueue) {
+        await (delta > 0 ? nativeQueue.next() : nativeQueue.prev());
+        return;
+      }
       const q = queueRef.current;
       if (currentId == null || q.length === 0) return;
       const next = q[q.indexOf(currentId) + delta];
@@ -593,8 +694,19 @@ export default function App() {
   // a track that is already playing (shuffle toggled, repeat cycled, autoplay
   // switched off). Playing a track is handled by `startTrack`, not here.
   useEffect(() => {
+    if (nativeQueue) return;
     setNextTrack(followerOf(currentId)).catch(() => {});
   }, [followerOf, currentId, shuffle]);
+
+  // Android: repeat and autoplay are applied by the player, which stages
+  // what follows by itself (Fase 1.7).
+  const repeatRef = useRef(repeat);
+  repeatRef.current = repeat;
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
+  useEffect(() => {
+    nativeQueue?.setMode(repeat, prefs.autoplay).catch(() => {});
+  }, [repeat, prefs.autoplay]);
 
 
   /// Desktop only, and only while a seamless mode is on: there the player
@@ -613,6 +725,13 @@ export default function App() {
   // track.
   const advancing = useRef(false);
   const onTrackEnded = useCallback(async () => {
+    // Android: the player already went on to whatever follows (repeat
+    // included), so reaching an end means nothing does — end of the queue or
+    // autoplay off. It stays there, paused.
+    if (nativeQueue) {
+      setPaused(true);
+      return;
+    }
     if (currentId == null || advancing.current) return;
     // Autoplay off: the track ends and playback stays there, on it. Same
     // place the end of the queue leaves you.
@@ -649,7 +768,9 @@ export default function App() {
   /// need to be told.
   const onAdvanced = useCallback(
     (id: number) => {
-      if (repeat === 'once') {
+      // With a native queue the player consumed "once" and staged the next
+      // one itself; it reports the first as a `repeat` event.
+      if (!nativeQueue && repeat === 'once') {
         setRepeat('off');
       }
       setCurrentId(id);
@@ -657,7 +778,7 @@ export default function App() {
       setPosMs(0);
       // The one that just took over needs a follower of its own: the plugin
       // consumed what was staged, so nothing is queued behind it now.
-      setNextTrack(followerOfRef.current(id)).catch(() => {});
+      if (!nativeQueue) setNextTrack(followerOfRef.current(id)).catch(() => {});
     },
     [repeat],
   );
@@ -679,16 +800,17 @@ export default function App() {
   }, [posMs, current, paused, onTrackEnded, playerDrivesTransitions]);
 
   function onToggleShuffle() {
-    setShuffle((s) => {
-      const next = !s;
-      // Rebuilds the queue keeping the current track first.
-      if (currentId != null) {
-        queueRef.current = next
-          ? buildQueue(visibleTracks.map((t) => t.id), currentId, true)
-          : visibleTracks.map((t) => t.id);
-      }
-      return next;
-    });
+    const next = !shuffle;
+    setShuffle(next);
+    // Rebuilds the queue keeping the current track first.
+    if (currentId != null) {
+      const ids = next
+        ? buildQueue(visibleTracks.map((t) => t.id), currentId, true)
+        : visibleTracks.map((t) => t.id);
+      setQueue(ids);
+      // Android: the player's copy too, without touching what is playing.
+      nativeQueue?.update(ids, currentId, repeat, prefs.autoplay).catch(() => {});
+    }
   }
 
   function onCycleRepeat() {
@@ -732,6 +854,12 @@ export default function App() {
   // only moves to the previous one if you were already at the start. Shared
   // by the player's button and the notification's.
   function onPrev() {
+    // Android: the player decides between "previous" and "restart" with the
+    // real position, not the last one this component rendered.
+    if (nativeQueue) {
+      nativeQueue.prev().catch(() => {});
+      return;
+    }
     if (posMsRef.current > RESTART_MS) onSeek(0);
     else playOffsetRef.current(-1);
   }
@@ -747,26 +875,47 @@ export default function App() {
   // quiet track has to survive it coming round again, which is why it goes to
   // the DB and not to a slider that resets.
   //
-  // Written through with the same throttle as the volume (dragging a knob
-  // fires per pixel), and mirrored into the loaded lists so the value shown
-  // doesn't wait for a library refresh.
+  // Dragging a knob fires per pixel, so three things run at three speeds:
+  // - the knob itself follows `gainLive`, local to the player bar;
+  // - the write goes out throttled AND one at a time: on Android each one is
+  //   a round trip through the plugin, and firing the next before the last
+  //   came back only stacked them up behind a slow one;
+  // - the loaded lists are patched once the knob settles. Patching them per
+  //   pixel re-rendered the whole (unvirtualized) track table on every step,
+  //   which on a phone was enough on its own to freeze the UI.
+  const [gainLive, setGainLive] = useState<{ id: number; db: number } | null>(null);
   const gainPending = useRef<{ id: number; db: number } | null>(null);
+  const gainInFlight = useRef(false);
+  const gainSettle = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function flushGain() {
+    const p = gainPending.current;
+    if (!p || gainInFlight.current) return;
+    gainPending.current = null;
+    gainInFlight.current = true;
+    setTrackGain(p.id, p.db)
+      .catch(() => {})
+      .finally(() => {
+        gainInFlight.current = false;
+        if (gainPending.current) setTimeout(flushGain, 60);
+      });
+  }
   function onGain(gainDb: number) {
     if (currentId == null) return;
     const id = currentId;
-    const patch = (ts: Track[]) =>
-      ts.map((t) => (t.id === id ? { ...t, gainDb } : t));
-    setLibrary(patch);
-    setPlTracks(patch);
+    setGainLive({ id, db: gainDb });
     const first = gainPending.current == null;
     gainPending.current = { id, db: gainDb };
-    if (first) {
-      setTimeout(() => {
-        const p = gainPending.current;
-        gainPending.current = null;
-        if (p) setTrackGain(p.id, p.db).catch(() => {});
-      }, 60);
-    }
+    // While a write is out, its `finally` picks the latest value up.
+    if (first && !gainInFlight.current) setTimeout(flushGain, 60);
+    if (gainSettle.current) clearTimeout(gainSettle.current);
+    gainSettle.current = setTimeout(() => {
+      gainSettle.current = null;
+      const patch = (ts: Track[]) =>
+        ts.map((t) => (t.id === id ? { ...t, gainDb } : t));
+      setLibrary(patch);
+      setPlTracks(patch);
+      setGainLive(null);
+    }, 400);
   }
 
   // Playback preferences. Saved in the backend (the audio thread reads them
@@ -1234,7 +1383,11 @@ export default function App() {
 
       {playerTrack && (
         <PlayerBar
-          track={playerTrack}
+          track={
+            gainLive && gainLive.id === playerTrack.id
+              ? { ...playerTrack, gainDb: gainLive.db }
+              : playerTrack
+          }
           closing={current == null}
           paused={paused}
           posMs={posMs}
@@ -1357,6 +1510,10 @@ export default function App() {
           }}
         />
       )}
+
+      {/* After the other modals: the code has to sit on top of them. */}
+      <PairingDialog onStatus={setStatus} />
+      <SyncIndicator hidden={modal?.type === 'sync' || !!importProgress} />
 
       {status && (
         <div className="status-toast" role="status">

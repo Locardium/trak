@@ -16,8 +16,10 @@ import android.net.Uri
 import android.app.ActivityManager
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -37,6 +39,10 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
+import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.max
@@ -46,7 +52,11 @@ import kotlin.math.sin
 private const val TAG = "plugin/native-audio"
 private const val EVENT_STATE = "native_audio_state"
 private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 9512
-private const val FOREGROUND_PROGRESS_TICK_MS = 25L
+// 100 and not 25: at 25 ms it was 40 round trips Kotlin -> Rust -> JS a
+// second on the UI thread, part of the lag while syncing (1.2). Since the
+// queue is native (1.7) nothing times track changes off this tick anymore;
+// it only moves the progress bar.
+private const val FOREGROUND_PROGRESS_TICK_MS = 100L
 private const val BACKGROUND_PROGRESS_TICK_MS = 250L
 private const val SEEK_INCREMENT_MS = 10_000L
 private const val SEEK_STATE_STALE_MS = 1_500L
@@ -86,6 +96,20 @@ private const val MAX_CUT_DB = 24.0
 /// a navigation prompt talking over the music. Roughly -14 dB.
 private const val DUCK_VOLUME = 0.2f
 
+/// Before this point in the track, "previous" goes to the previous entry of
+/// the queue instead of restarting the current one. Same figure the app uses
+/// (`RESTART_MS` in App.tsx).
+private const val QUEUE_RESTART_MS = 3_000L
+
+/// Where the play queue is kept between processes (Fase 1.7): the entries in
+/// a file, since they can run to hundreds of tracks; the position and the
+/// modes in preferences, since they change on every track.
+private const val QUEUE_FILE_NAME = "native_audio_queue.json"
+private const val QUEUE_PREFS_NAME = "tauri_native_audio_queue"
+private const val QUEUE_KEY_POS = "pos"
+private const val QUEUE_KEY_REPEAT = "repeat"
+private const val QUEUE_KEY_AUTOPLAY = "autoplay"
+
 data class NativeAudioState(
     val status: String,
     val currentTime: Double,
@@ -106,6 +130,12 @@ data class NativeAudioState(
     val crossfade: Double,
     val outputDeviceId: Int?,
     val error: String? = null,
+    /// The native queue (Fase 1.7). `queueIndex` is -1 with no queue; the app
+    /// reads `repeatMode` back because "once" turns itself off here, on the
+    /// transition, and the button has to show that.
+    val repeatMode: String = "off",
+    val queueIndex: Int = -1,
+    val queueLength: Int = 0,
 )
 
 data class NativeAudioProgressCheckpoint(
@@ -127,7 +157,7 @@ class SetSourceArgs {
     var id: Long? = null
     var title: String? = null
     var artist: String? = null
-    var artworkUrl: String? = null
+    var artwork: String? = null
     var gainDb: Double? = null
     /// Where the audio actually starts and ends, in ms. The silence a file
     /// carries at its edges is what a "gap" between tracks is made of, so
@@ -136,6 +166,22 @@ class SetSourceArgs {
     /// played whole rather than cut at a guess.
     var leadMs: Long? = null
     var audioEndMs: Long? = null
+}
+
+/// `src` is a plain file path. `Uri.fromFile` and not `Uri.parse("file://" +
+/// path)`: a raw path turned into a URI by hand breaks on any `#`, `?` or `%`
+/// in a file name ("Session Guaratech #1" was read as a fragment and the file
+/// never found). The prefix is stripped for queues saved by builds that still
+/// sent `file://`.
+private fun fileUri(src: String?): Uri = Uri.fromFile(File((src ?: "").removePrefix("file://")))
+
+@InvokeArg
+class SyncNoticeArgs {
+    var title: String? = null
+    var text: String? = null
+    var done: Int? = null
+    var total: Int? = null
+    var icon: String? = null
 }
 
 @InvokeArg
@@ -168,6 +214,41 @@ class SetOutputDeviceArgs {
     var id: Int? = null
 }
 
+/// One entry of the native queue: everything needed to play it with no help
+/// from JS or Rust — which matters because neither is around when Android
+/// restarts only the audio service (Fase 1.7).
+@InvokeArg
+class QueueItemArgs {
+    var id: Long? = null
+    var src: String? = null
+    var title: String? = null
+    var artist: String? = null
+    var artwork: String? = null
+    var gainDb: Double? = null
+    var leadMs: Long? = null
+    var audioEndMs: Long? = null
+}
+
+@InvokeArg
+class SetQueueArgs {
+    var items: List<QueueItemArgs>? = null
+    /// Entry to start (with `play`) or the one that is already playing
+    /// (without it). -1 without `play` = look the current track up by id.
+    var index: Int? = null
+    /// `true` loads `index` and plays it. `false` only replaces the queue
+    /// around what is playing (shuffle toggled, cues refreshed) — the current
+    /// track is not touched, only what is staged after it.
+    var play: Boolean? = null
+    var repeat: String? = null
+    var autoplay: Boolean? = null
+}
+
+@InvokeArg
+class SetQueueModeArgs {
+    var repeat: String? = null
+    var autoplay: Boolean? = null
+}
+
 private data class PendingSeekState(
     val shouldResume: Boolean,
     val startedAtMs: Long,
@@ -175,12 +256,12 @@ private data class PendingSeekState(
 
 /// What `setSource`/`setNextSource` received, kept whole so a staged item can
 /// be re-prepared on the other deck when the crossfade setting changes.
-private data class SourceSpec(
+internal data class SourceSpec(
     val src: String,
     val id: Long?,
     val title: String?,
     val artist: String?,
-    val artworkUrl: String?,
+    val artwork: String?,
     val gainDb: Double,
     /// Playable region in ms; `0` for either edge means the file's own.
     val leadMs: Long = 0L,
@@ -210,12 +291,25 @@ private class Deck(val player: ExoPlayer) {
     /// Tied to the session id it was built for: ExoPlayer hands out a new one
     /// when the audio track is rebuilt (a format change does it), and an
     /// enhancer left on the old session boosts nothing.
+    ///
+    /// The effect itself is only ever touched on the boost thread (see
+    /// `NativeAudioRuntime.boostHandler`); the main side writes what it wants
+    /// into the `boostWanted*` fields and queues a reconcile.
     var boost: LoudnessEnhancer? = null
     var boostSessionId: Int = C.AUDIO_SESSION_ID_UNSET
-    /// What was last pushed to the effect, in millibels. The crossfade ramp
-    /// re-applies the volume ~33 times a second and almost none of those
-    /// change the boost; this keeps the native calls down to the ones that do.
+    /// What was last pushed to the effect, in millibels. Boost thread only.
     var boostAppliedMb: Int = 0
+
+    /// What the boost should be right now. Written under the runtime lock,
+    /// read by the boost thread. The crossfade ramp re-applies the volume ~33
+    /// times a second and almost none of those change these; comparing against
+    /// them keeps the queued work down to the calls that matter.
+    @Volatile var boostWantedSession: Int = C.AUDIO_SESSION_ID_UNSET
+    @Volatile var boostWantedMb: Int = 0
+    /// The player is gone: the boost thread drops the effect and stops there.
+    @Volatile var boostRetired: Boolean = false
+    /// A reconcile is already posted; the next one would read the same wish.
+    val boostQueued = AtomicBoolean(false)
 
     fun releaseBoost() {
         runCatching { boost?.release() }
@@ -229,6 +323,18 @@ object NativeAudioRuntime {
     private val lock = Any()
     private val tickHandler = Handler(Looper.getMainLooper())
     private var tickScheduled = false
+
+    /// Where every `LoudnessEnhancer` call happens. Building one, releasing it
+    /// and changing its gain are synchronous binder calls into audioserver,
+    /// and on some ROMs they block for hundreds of ms. On the main looper —
+    /// where every plugin command, the progress tick and the fade run — that
+    /// froze the whole WebView while the gain knob moved, with ExoPlayer still
+    /// playing happily on its own. See `applyBoostLocked`.
+    private val boostHandler: Handler by lazy {
+        val thread = HandlerThread("native-audio-boost")
+        thread.start()
+        Handler(thread.looper)
+    }
 
     /// Index 0 is built on `ensure`; index 1 only when a crossfade needs it.
     private val decks = arrayOfNulls<Deck>(2)
@@ -252,6 +358,41 @@ object NativeAudioRuntime {
     private var masterVolume: Float = 1f
     private var crossfadeMs: Long = 0L
     private var outputDeviceId: Int? = null
+
+    // --- Native play queue (Fase 1.7) ----------------------------------------
+    //
+    // The app used to keep the queue in React state and drive every
+    // transition from JS. On Android that broke in two ways, both measured on
+    // device (see docs/progress/PLAN-BETA1.md, 1.6):
+    // - With the app off screen React stops re-rendering (the page's task
+    //   queues are frozen) while events still reach JS. The refs that "next"
+    //   read only update on render, so every "next" from the notification
+    //   computed from a stale current track and reloaded the same one.
+    // - Samsung kills the process almost daily while playback is paused, and
+    //   the queue lived only in memory.
+    // So the queue lives here, where the gapless hand-off already worked on
+    // its own, and on disk. JS builds it (shuffle, filters) and hands it over;
+    // from then on next/previous/end of track are decided here.
+
+    /// Entries in play order (shuffle already applied by JS). Empty = queue
+    /// mode off: the plugin behaves as before and JS drives.
+    private var queue: List<SourceSpec> = emptyList()
+    /// Index of the entry loaded right now, -1 when it isn't in the queue.
+    private var queuePos = -1
+    /// "off" | "track" (loop this one) | "once" (loop it once, then "off").
+    private var repeatMode = "off"
+    /// Off = a track that ends stays ended. Buttons still move the queue.
+    private var autoplay = true
+    /// The saved queue was already read (or found missing) in this process.
+    private var queueRestored = false
+
+    /// Disk writes for the queue. Never the main looper: every plugin command
+    /// and the progress tick run there (see CLAUDE.md).
+    private val ioHandler: Handler by lazy {
+        val thread = HandlerThread("native-audio-io")
+        thread.start()
+        Handler(thread.looper)
+    }
 
     // --- Audio focus ---------------------------------------------------------
     //
@@ -364,12 +505,13 @@ object NativeAudioRuntime {
     private var fadeOutIdx = -1
 
     /// Set by the host app to take over next/previous from the notification and
-    /// the lock screen; `null` keeps upstream's behaviour of turning them into
-    /// 10-second jumps. Re-applied on every deck swap, which is why it lives
-    /// here and not in the app's Activity — the wrapper is rebuilt each time
-    /// the session changes player and anything installed from outside is lost.
+    /// the lock screen. Returns whether it actually reached JS: `false` (or
+    /// `null` altogether) falls back to `transport`'s native handling below.
+    /// Re-applied on every deck swap, which is why it lives here and not in
+    /// the app's Activity — the wrapper is rebuilt each time the session
+    /// changes player and anything installed from outside is lost.
     @Volatile
-    var transportInterceptor: ((String) -> Unit)? = null
+    var transportInterceptor: ((String) -> Boolean)? = null
 
     /// Notified with the session player whenever the active deck changes, so
     /// the notification can follow it (see `NativeAudioService`).
@@ -446,6 +588,11 @@ object NativeAudioRuntime {
         /// `setNextSource` appended. Nothing was asked for and nothing ended —
         /// the id and the gain have to be picked up from the new item.
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            // `PLAYLIST_CHANGED` is our own `setMediaItem` (a track loaded on
+            // purpose, the queue already knows); anything else is the player
+            // moving on by itself.
+            val advanced = mediaItem != null &&
+                reason != Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED
             synchronized(lock) {
                 if (!isActive()) return@synchronized
                 val info = itemInfoOf(mediaItem)
@@ -453,11 +600,13 @@ object NativeAudioRuntime {
                 deck.gainDb = info?.gainDb ?: 0.0
                 stagedNext = null
                 applyVolumeLocked(deck)
+                if (advanced) onQueueAdvancedLocked(currentStoryId)
             }
             // Everything before the current index has already played and is
             // dropped so the playlist never grows past "current + next". Posted
             // instead of done right here: changing the playlist from inside a
             // player callback re-enters ExoPlayer while it is still dispatching.
+            // Staging what follows is a playlist change too, so it goes here.
             tickHandler.post {
                 synchronized(lock) {
                     if (decks[activeIdx] !== deck) return@synchronized
@@ -465,7 +614,12 @@ object NativeAudioRuntime {
                     if (exoPlayer.currentMediaItemIndex > 0) {
                         exoPlayer.removeMediaItems(0, exoPlayer.currentMediaItemIndex)
                     }
+                    if (advanced) {
+                        restageLocked()
+                        persistQueueStateLocked()
+                    }
                 }
+                if (advanced) emitState()
             }
             if (!synchronized(lock) { isActive() }) return
             emitState()
@@ -626,46 +780,78 @@ object NativeAudioRuntime {
         storyId: Long?,
         title: String?,
         artist: String?,
-        artworkUrl: String?,
+        artwork: String?,
         gainDb: Double?,
         leadMs: Long?,
         audioEndMs: Long?,
     ) {
         synchronized(lock) {
             ensure(context)
-            val deck = decks[activeIdx] ?: return
-            val exoPlayer = deck.player
-
-            val spec = SourceSpec(src, storyId, title, artist, artworkUrl, safeGain(gainDb), leadMs ?: 0L, audioEndMs ?: 0L)
-
-            // An explicit source cancels anything queued behind it, including a
-            // crossfade halfway through.
-            abortFadeLocked()
-            clearNextLocked()
-            pendingSeekState = null
-            currentStoryId = storyId?.takeIf { it > 0 }
-            deck.gainDb = spec.gainDb
-            exoPlayer.setMediaItem(buildMediaItem(spec))
-            exoPlayer.prepare()
-            applyVolumeLocked(deck)
-            lastError = null
-            syncTickingLocked()
+            val spec = SourceSpec(src, storyId, title, artist, artwork, safeGain(gainDb), leadMs ?: 0L, audioEndMs ?: 0L)
+            setSourceLocked(spec)
+            // Loaded from outside the queue. If it is one of its entries the
+            // queue follows it; if not, the queue no longer describes what is
+            // playing and stepping it would jump somewhere unrelated.
+            if (queue.isNotEmpty()) {
+                val idx = queue.indexOfFirst { it.id != null && it.id == spec.id }
+                if (idx >= 0) {
+                    queuePos = idx
+                    restageLocked()
+                    persistQueueStateLocked()
+                } else {
+                    clearQueueLocked()
+                }
+            }
         }
         emitState()
+    }
+
+    private fun setSourceLocked(spec: SourceSpec) {
+        val deck = decks[activeIdx] ?: return
+        val exoPlayer = deck.player
+        // An explicit source cancels anything queued behind it, including a
+        // crossfade halfway through.
+        abortFadeLocked()
+        clearNextLocked()
+        pendingSeekState = null
+        currentStoryId = spec.id?.takeIf { it > 0 }
+        deck.gainDb = spec.gainDb
+        exoPlayer.setMediaItem(buildMediaItem(spec))
+        exoPlayer.prepare()
+        applyVolumeLocked(deck)
+        lastError = null
+        syncTickingLocked()
     }
 
     /// The gain of the item that is already playing. ReplayGain often arrives
     /// after playback started (the tag is read on another thread, or the value
     /// is computed later), and re-issuing `setSource` to carry it would restart
     /// the track.
-    fun setSourceGain(context: Context, gainDb: Double?) {
-        synchronized(lock) {
+    ///
+    /// Returns the state it emitted, so the command can resolve with it
+    /// instead of taking the lock a second time for another snapshot.
+    fun setSourceGain(context: Context, gainDb: Double?): NativeAudioState {
+        val snapshot = synchronized(lock) {
             ensure(context)
-            val deck = decks[activeIdx] ?: return
-            deck.gainDb = safeGain(gainDb)
-            applyVolumeLocked(deck)
+            val safe = safeGain(gainDb)
+            decks[activeIdx]?.let {
+                it.gainDb = safe
+                applyVolumeLocked(it)
+            }
+            // The queue's copy too, or the track comes back at the old level
+            // the next time it plays (repeat, previous) — including after the
+            // process was killed and the queue was read back from disk.
+            val id = currentStoryId
+            if (id != null && queue.any { it.id == id && it.gainDb != safe }) {
+                queue = queue.map { if (it.id == id) it.copy(gainDb = safe) else it }
+                persistQueueItemsLocked()
+                // A repeat stages this same track again, with the old level.
+                restageLocked()
+            }
+            snapshotLocked()
         }
-        emitState()
+        NativeAudioPlugin.emitToActive(snapshot)
+        return snapshot
     }
 
     /// What plays after the current item, or `null` to clear it.
@@ -679,17 +865,20 @@ object NativeAudioRuntime {
         storyId: Long?,
         title: String?,
         artist: String?,
-        artworkUrl: String?,
+        artwork: String?,
         gainDb: Double?,
         leadMs: Long?,
         audioEndMs: Long?,
     ) {
         synchronized(lock) {
             ensure(context)
+            // With a native queue, what follows is the queue's call — a
+            // late `setNextSource` from JS would stage the wrong track.
+            if (queue.isNotEmpty()) return@synchronized
             if (src.isNullOrBlank()) {
                 clearNextLocked()
             } else {
-                val spec = SourceSpec(src, storyId, title, artist, artworkUrl, safeGain(gainDb), leadMs ?: 0L, audioEndMs ?: 0L)
+                val spec = SourceSpec(src, storyId, title, artist, artwork, safeGain(gainDb), leadMs ?: 0L, audioEndMs ?: 0L)
                 if (fading) pendingNext = spec else stageNextLocked(spec)
             }
         }
@@ -719,6 +908,323 @@ object NativeAudioRuntime {
         }
         emitState()
         return moved
+    }
+
+    // --- Native queue: commands -----------------------------------------------
+
+    /// Replaces the queue. With `play`, loads `index` and starts it. Without,
+    /// only the queue around what is playing changes (shuffle toggled, cues
+    /// refreshed): the current track keeps going and only what is staged
+    /// after it is redone.
+    internal fun setQueue(
+        context: Context,
+        items: List<SourceSpec>,
+        index: Int,
+        play: Boolean,
+        repeat: String?,
+        autoplayOn: Boolean?,
+    ) {
+        val startPlaying = synchronized(lock) {
+            ensure(context)
+            // What JS hands over wins over anything saved by an earlier
+            // process that has not been read back yet.
+            queueRestored = true
+            repeat?.let { repeatMode = normalizeRepeat(it) }
+            autoplayOn?.let { autoplay = it }
+            queue = items
+            persistQueueItemsLocked()
+            if (play && index in items.indices) {
+                loadQueueIndexLocked(index)
+                true
+            } else {
+                queuePos = if (index in items.indices) {
+                    index
+                } else {
+                    items.indexOfFirst { it.id != null && it.id == currentStoryId }
+                }
+                // The track already playing keeps playing, but at the level
+                // the new entry says: a queue pushed because normalization
+                // was toggled has to be heard now, not from the next track.
+                items.getOrNull(queuePos)?.takeIf { it.id == currentStoryId }?.let { entry ->
+                    decks[activeIdx]?.let {
+                        it.gainDb = safeGain(entry.gainDb)
+                        applyVolumeLocked(it)
+                    }
+                }
+                restageLocked()
+                persistQueueStateLocked()
+                false
+            }
+        }
+        if (startPlaying) play(context) else emitState()
+    }
+
+    fun setQueueMode(context: Context, repeat: String?, autoplayOn: Boolean?) {
+        synchronized(lock) {
+            ensure(context)
+            repeat?.let { repeatMode = normalizeRepeat(it) }
+            autoplayOn?.let { autoplay = it }
+            restageLocked()
+            persistQueueStateLocked()
+        }
+        emitState()
+    }
+
+    /// Next entry, from any source: the app's button, the notification, the
+    /// lock screen, a car's Bluetooth. Ignores repeat on purpose: pressing
+    /// "next" means leaving this track, which is what the app always did.
+    fun queueNext(context: Context) {
+        val startPlaying = synchronized(lock) {
+            ensure(context)
+            val exoPlayer = player ?: return@synchronized false
+            val target = queuePos + 1
+            if (queuePos !in queue.indices || target !in queue.indices) {
+                // End of the queue: stays on the current track, paused. The
+                // same place the app has always left it.
+                abortFadeLocked()
+                exoPlayer.pause()
+                syncTickingLocked()
+                appContext?.let { persistProgressCheckpointLocked(it, snapshotLocked(), force = true) }
+                return@synchronized false
+            }
+            val spec = queue[target]
+            val idle = decks[1 - activeIdx]
+            if (crossfadeMs > 0L && exoPlayer.isPlaying && !fading && stagedNext == spec &&
+                idle?.player?.currentMediaItem != null
+            ) {
+                // Already prepared on the other deck: overlap into it, the
+                // same as reaching the fade point, instead of cutting.
+                startFadeLocked()
+                false
+            } else {
+                loadQueueIndexLocked(target)
+                true
+            }
+        }
+        if (startPlaying) play(context) else emitState()
+    }
+
+    /// Previous entry, or back to the start of this one once it has been
+    /// playing a while: the standard "back" of any player.
+    fun queuePrev(context: Context) {
+        val stepBack = synchronized(lock) {
+            ensure(context)
+            val exoPlayer = player ?: return@synchronized false
+            if (queuePos > 0 && exoPlayer.currentPosition <= QUEUE_RESTART_MS) {
+                loadQueueIndexLocked(queuePos - 1)
+                true
+            } else {
+                false
+            }
+        }
+        if (stepBack) play(context) else seekTo(context, 0.0)
+    }
+
+    /// Reads the queue saved by an earlier process back in, once per process.
+    ///
+    /// Samsung kills the process almost daily while playback is paused. When
+    /// that happened the queue was gone, and a "next" after reopening had
+    /// nowhere to go but the one track the progress checkpoint remembered.
+    ///
+    /// Disk I/O runs on `ioHandler`; the result is applied on the main
+    /// looper, where ExoPlayer lives, and `done` runs there after it.
+    fun restoreQueue(context: Context, done: () -> Unit) {
+        val ctx = context.applicationContext
+        val alreadyRestored = synchronized(lock) {
+            ensure(ctx)
+            val restored = queueRestored
+            queueRestored = true
+            restored
+        }
+        if (alreadyRestored) {
+            tickHandler.post(done)
+            return
+        }
+        ioHandler.post {
+            val saved = runCatching { readQueueFile(ctx) }
+                .onFailure { Log.w(TAG, "queue read failed", it) }
+                .getOrNull()
+            tickHandler.post {
+                synchronized(lock) {
+                    if (saved != null && queue.isEmpty() && saved.items.isNotEmpty()) {
+                        queue = saved.items
+                        repeatMode = saved.repeat
+                        autoplay = saved.autoplay
+                        val pos = saved.pos.takeIf { it in queue.indices } ?: -1
+                        if (player?.currentMediaItem == null && pos >= 0) {
+                            // Fresh process, nothing loaded: the entry goes back
+                            // where playback stopped, paused, like reopening
+                            // any music app.
+                            val cp = getProgressCheckpoint(ctx)
+                            val startMs = if (cp != null && cp.id == queue[pos].id) {
+                                (cp.currentTime * 1000.0).toLong()
+                            } else {
+                                0L
+                            }
+                            loadQueueIndexLocked(pos, startMs)
+                        } else {
+                            queuePos = queue.indexOfFirst { it.id != null && it.id == currentStoryId }
+                            restageLocked()
+                        }
+                    }
+                }
+                emitState()
+                done()
+            }
+        }
+    }
+
+    /// Routes a transport button to the queue. `false` = there is no queue,
+    /// so the caller should fall back to the old path through JS.
+    fun mediaButton(button: String): Boolean {
+        val ctx = appContext ?: return false
+        if (synchronized(lock) { queue.isEmpty() }) return false
+        when (button) {
+            "next" -> queueNext(ctx)
+            "prev" -> queuePrev(ctx)
+            else -> return false
+        }
+        return true
+    }
+
+    // --- Native queue: internals ---------------------------------------------
+
+    private fun normalizeRepeat(value: String): String =
+        if (value == "track" || value == "once") value else "off"
+
+    /// Which entry plays after the current one on its own. `null` = none:
+    /// autoplay off, or the end of the queue.
+    private fun followerIndexLocked(): Int? {
+        if (!autoplay || queuePos !in queue.indices) return null
+        if (repeatMode == "track" || repeatMode == "once") return queuePos
+        return (queuePos + 1).takeIf { it in queue.indices }
+    }
+
+    /// Makes what is staged behind the current entry match the queue. Only
+    /// the staged slot is touched, never what is playing.
+    private fun restageLocked() {
+        if (queue.isEmpty()) return
+        val spec = followerIndexLocked()?.let { queue[it] }
+        if (fading) {
+            pendingNext = spec
+            return
+        }
+        if (spec == null) {
+            clearNextLocked()
+            return
+        }
+        if (stagedNext == spec) return
+        stageNextLocked(spec)
+    }
+
+    /// The player moved on by itself (gapless hand-off or crossfade): find
+    /// the entry it moved to, and consume a one-off repeat.
+    private fun onQueueAdvancedLocked(newId: Long?) {
+        if (queue.isEmpty()) return
+        val expected = followerIndexLocked()
+        queuePos = if (expected != null && queue[expected].id == newId) {
+            expected
+        } else {
+            queue.indexOfFirst { it.id != null && it.id == newId }
+        }
+        if (repeatMode == "once") repeatMode = "off"
+    }
+
+    private fun loadQueueIndexLocked(index: Int, startMs: Long = 0L) {
+        queuePos = index
+        setSourceLocked(queue[index])
+        if (startMs > 0L) decks[activeIdx]?.player?.seekTo(startMs)
+        restageLocked()
+        persistQueueStateLocked()
+    }
+
+    private fun clearQueueLocked() {
+        queue = emptyList()
+        queuePos = -1
+        persistQueueItemsLocked()
+        persistQueueStateLocked()
+    }
+
+    private data class SavedQueue(
+        val items: List<SourceSpec>,
+        val pos: Int,
+        val repeat: String,
+        val autoplay: Boolean,
+    )
+
+    private fun queuePrefs(context: Context): SharedPreferences =
+        context.getSharedPreferences(QUEUE_PREFS_NAME, Context.MODE_PRIVATE)
+
+    /// Position and modes: small and changing on every track, so preferences,
+    /// whose `apply()` already writes off the calling thread.
+    private fun persistQueueStateLocked() {
+        val ctx = appContext ?: return
+        queuePrefs(ctx).edit()
+            .putInt(QUEUE_KEY_POS, queuePos)
+            .putString(QUEUE_KEY_REPEAT, repeatMode)
+            .putBoolean(QUEUE_KEY_AUTOPLAY, autoplay)
+            .apply()
+    }
+
+    /// The entries: can be hundreds, so a file, built and written on
+    /// `ioHandler` from a snapshot of the (immutable) list. Written to a
+    /// temporary name and renamed, so a kill mid-write leaves the old file.
+    private fun persistQueueItemsLocked() {
+        val ctx = appContext ?: return
+        val items = queue
+        ioHandler.post {
+            runCatching {
+                val array = JSONArray()
+                items.forEach { spec ->
+                    array.put(
+                        JSONObject()
+                            .put("id", spec.id ?: 0L)
+                            .put("src", spec.src)
+                            .put("title", spec.title ?: "")
+                            .put("artist", spec.artist ?: "")
+                            .put("artwork", spec.artwork ?: "")
+                            .put("gainDb", spec.gainDb)
+                            .put("leadMs", spec.leadMs)
+                            .put("audioEndMs", spec.audioEndMs),
+                    )
+                }
+                val file = File(ctx.filesDir, QUEUE_FILE_NAME)
+                val tmp = File(ctx.filesDir, "$QUEUE_FILE_NAME.tmp")
+                tmp.writeText(array.toString())
+                if (!tmp.renameTo(file)) {
+                    file.delete()
+                    tmp.renameTo(file)
+                }
+            }.onFailure { Log.w(TAG, "queue write failed", it) }
+        }
+    }
+
+    /// `ioHandler` only.
+    private fun readQueueFile(context: Context): SavedQueue? {
+        val file = File(context.filesDir, QUEUE_FILE_NAME)
+        if (!file.exists()) return null
+        val array = JSONArray(file.readText())
+        val items = (0 until array.length()).mapNotNull { i ->
+            val o = array.optJSONObject(i) ?: return@mapNotNull null
+            val src = o.optString("src").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            SourceSpec(
+                src = src,
+                id = o.optLong("id").takeIf { it > 0 },
+                title = o.optString("title").ifBlank { null },
+                artist = o.optString("artist").ifBlank { null },
+                artwork = o.optString("artwork").ifBlank { null },
+                gainDb = safeGain(o.optDouble("gainDb", 0.0)),
+                leadMs = o.optLong("leadMs"),
+                audioEndMs = o.optLong("audioEndMs"),
+            )
+        }
+        val prefs = queuePrefs(context)
+        return SavedQueue(
+            items = items,
+            pos = prefs.getInt(QUEUE_KEY_POS, -1),
+            repeat = normalizeRepeat(prefs.getString(QUEUE_KEY_REPEAT, "off") ?: "off"),
+            autoplay = prefs.getBoolean(QUEUE_KEY_AUTOPLAY, true),
+        )
     }
 
     fun play(context: Context) {
@@ -886,6 +1392,28 @@ object NativeAudioRuntime {
         }
     }
 
+    /// Stop (3.3): nothing loaded and nothing to come back to — the queue goes
+    /// in memory and on disk, the checkpoint too, and with the service the
+    /// notification. The one place that does it, for the app's button and the
+    /// notification's alike; JS hears it as a state with no track.
+    fun stop(context: Context) {
+        synchronized(lock) {
+            ensure(context)
+            abortFadeLocked()
+            clearNextLocked()
+            clearQueueLocked()
+            decks.forEach { deck ->
+                deck?.player?.stop()
+                deck?.player?.clearMediaItems()
+            }
+            currentStoryId = null
+            syncTickingLocked()
+        }
+        clearProgressCheckpoint(context)
+        stopService(context)
+        emitState()
+    }
+
     fun dispose(context: Context) {
         synchronized(lock) {
             persistProgressCheckpointLocked(context.applicationContext, snapshotLocked(), force = true)
@@ -899,7 +1427,7 @@ object NativeAudioRuntime {
             decks.forEachIndexed { i, deck ->
                 deck ?: return@forEachIndexed
                 deck.listener?.let { deck.player.removeListener(it) }
-                deck.releaseBoost()
+                retireBoostLocked(deck)
                 deck.player.release()
                 decks[i] = null
             }
@@ -914,6 +1442,10 @@ object NativeAudioRuntime {
             currentStoryId = null
             stagedNext = null
             pendingNext = null
+            // In memory only: the copy on disk is what brings it back.
+            queue = emptyList()
+            queuePos = -1
+            queueRestored = false
             appContext = null
         }
         stopService(context)
@@ -1021,6 +1553,11 @@ object NativeAudioRuntime {
         val info = itemInfoOf(inDeck.player.currentMediaItem)
         currentStoryId = info?.id?.takeIf { it > 0 }
         inDeck.gainDb = info?.gainDb ?: inDeck.gainDb
+        // The queue moves with the swap. `fading` is already set, so what
+        // follows is held in `pendingNext` and staged when the ramp ends.
+        onQueueAdvancedLocked(currentStoryId)
+        restageLocked()
+        persistQueueStateLocked()
 
         bindSessionToActiveLocked()
         tickHandler.removeCallbacks(fadeRunnable)
@@ -1128,11 +1665,50 @@ object NativeAudioRuntime {
         override fun seekToNext() = transport("next") { exoPlayer.seekForward() }
         override fun seekToNextMediaItem() = transport("next") { exoPlayer.seekForward() }
         override fun seekForward() = transport("next") { exoPlayer.seekForward() }
+        override fun stop() {
+            appContext?.let { NativeAudioRuntime.stop(it) } ?: exoPlayer.stop()
+        }
     }
 
+    /// Hands a transport button to JS first — it is the one that knows the
+    /// queue, shuffle and repeat — and only acts natively when that fails.
+    ///
+    /// JS lives in the app's Activity, and Android is free to destroy that
+    /// Activity to reclaim memory while the music keeps playing: the plugin's
+    /// own foreground service (`NativeAudioService`) is a separate component
+    /// and outlives it. Before this fallback existed, a button pressed after
+    /// that point — from the notification, the lock screen or a car's
+    /// Bluetooth — did nothing at all: `interceptor` stayed installed (it's
+    /// a plain function reference, not tied to the dead Activity) but the
+    /// Activity it tried to reach for `evaluateJavascript` was gone, so the
+    /// call was silently dropped. The user's only way out was reopening the
+    /// app by hand. See `MainActivity.dispatchMediaButton`.
+    ///
+    /// The native fallback can't reproduce JS's queue (shuffle/repeat/what
+    /// comes after that), so it only goes as far as native state already
+    /// allows: one step into whatever gapless/crossfade already staged for
+    /// "next" (`skipToNext`, self-contained, no JS needed), and a restart of
+    /// the current track for "prev" — there is no track history kept outside
+    /// JS to go back further than that.
     private fun transport(button: String, fallback: () -> Unit) {
+        // With a native queue (Fase 1.7) the button never goes near JS: the
+        // queue answers it here, the same way it answers the app's own
+        // buttons. What follows is the old path, for when there is no queue.
+        if (mediaButton(button)) return
         val interceptor = transportInterceptor
-        if (interceptor != null) interceptor(button) else fallback()
+        val handledByJs = interceptor?.invoke(button) ?: false
+        if (handledByJs) return
+        when (button) {
+            "next" -> {
+                val moved = appContext?.let { skipToNext(it) } ?: false
+                if (!moved) fallback()
+            }
+            "prev" -> {
+                val exoPlayer = player
+                if (exoPlayer != null) exoPlayer.seekTo(0) else fallback()
+            }
+            else -> fallback()
+        }
     }
 
     // --- Volume and output ---------------------------------------------------
@@ -1159,22 +1735,54 @@ object NativeAudioRuntime {
         applyBoostLocked(deck, if (duck >= 1f) boostDb else 0.0)
     }
 
-    /// Points the deck's enhancer at whatever audio session it has now and
-    /// sets the boost, building or releasing it as needed.
+    /// Records the boost the deck should have and, if that changed, queues
+    /// the boost thread to make it so. Never touches the effect itself: see
+    /// `boostHandler` for why.
+    private fun applyBoostLocked(deck: Deck, boostDb: Double) {
+        val sessionId = deck.player.audioSessionId
+        // No session yet — nothing to attach to. Whatever the gain is, it is
+        // re-applied once one exists (see onAudioSessionIdChanged).
+        // Millibels, and only ever positive: this effect cannot attenuate.
+        val targetMb = if (sessionId == C.AUDIO_SESSION_ID_UNSET) 0
+            else (boostDb * 100.0).toInt().coerceAtLeast(0)
+        if (sessionId == deck.boostWantedSession && targetMb == deck.boostWantedMb) return
+        deck.boostWantedSession = sessionId
+        deck.boostWantedMb = targetMb
+        queueBoostLocked(deck)
+    }
+
+    /// The deck's player is about to be released: drop its effect too.
+    private fun retireBoostLocked(deck: Deck) {
+        deck.boostRetired = true
+        queueBoostLocked(deck)
+    }
+
+    private fun queueBoostLocked(deck: Deck) {
+        if (deck.boostQueued.compareAndSet(false, true)) {
+            boostHandler.post { reconcileBoost(deck) }
+        }
+    }
+
+    /// Boost thread only. Points the deck's enhancer at whatever session it
+    /// is wanted on and sets the boost, building or releasing it as needed.
+    ///
+    /// Reads the latest wish rather than one carried in the message, so a
+    /// knob dragged across forty values while the previous call was stuck in
+    /// audioserver costs one more call, not forty.
     ///
     /// Every step is guarded: `LoudnessEnhancer` is backed by a device effect
     /// that some ROMs refuse to allocate, and a phone that cannot boost should
     /// keep playing at the level it can reach rather than fall over.
-    private fun applyBoostLocked(deck: Deck, boostDb: Double) {
-        val sessionId = deck.player.audioSessionId
-        if (sessionId == C.AUDIO_SESSION_ID_UNSET) {
-            // No session yet — nothing to attach to. Whatever the gain is, it
-            // is re-applied once one exists (see onAudioSessionIdChanged).
+    private fun reconcileBoost(deck: Deck) {
+        // Cleared before reading, so a wish written from here on queues
+        // another pass instead of being lost.
+        deck.boostQueued.set(false)
+        val sessionId = deck.boostWantedSession
+        val targetMb = deck.boostWantedMb
+        if (deck.boostRetired || sessionId == C.AUDIO_SESSION_ID_UNSET) {
             deck.releaseBoost()
             return
         }
-        // Millibels, and only ever positive: this effect cannot attenuate.
-        val targetMb = (boostDb * 100.0).toInt().coerceAtLeast(0)
         if (targetMb == 0) {
             val enhancer = deck.boost ?: return
             if (deck.boostAppliedMb == 0) return
@@ -1330,12 +1938,11 @@ object NativeAudioRuntime {
         val metadataBuilder = MediaMetadata.Builder()
         if (!spec.title.isNullOrBlank()) metadataBuilder.setTitle(spec.title)
         if (!spec.artist.isNullOrBlank()) metadataBuilder.setArtist(spec.artist)
-        if (!spec.artworkUrl.isNullOrBlank()) {
-            runCatching { Uri.parse(spec.artworkUrl) }
-                .onSuccess { metadataBuilder.setArtworkUri(it) }
-        }
+        // A cached cover thumb (see the app's `cover.rs`): the notification
+        // and the system's media controls read it from here.
+        if (!spec.artwork.isNullOrBlank()) metadataBuilder.setArtworkUri(fileUri(spec.artwork))
         val builder = MediaItem.Builder()
-            .setUri(spec.src)
+            .setUri(fileUri(spec.src))
             .setTag(ItemInfo(spec.id?.takeIf { it > 0 }, spec.gainDb))
             .setMediaMetadata(metadataBuilder.build())
         // Trimming the silent edges is the whole of gapless here: ExoPlayer
@@ -1377,6 +1984,9 @@ object NativeAudioRuntime {
                 crossfade = crossfadeMs / 1000.0,
                 outputDeviceId = outputDeviceId,
                 error = null,
+                repeatMode = repeatMode,
+                queueIndex = queuePos,
+                queueLength = queue.size,
             )
 
         val rawDurationMs = exoPlayer.duration
@@ -1426,6 +2036,9 @@ object NativeAudioRuntime {
             crossfade = crossfadeMs / 1000.0,
             outputDeviceId = outputDeviceId,
             error = lastError,
+            repeatMode = repeatMode,
+            queueIndex = queuePos,
+            queueLength = queue.size,
         )
     }
 
@@ -1485,7 +2098,7 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
                 args.id,
                 args.title,
                 args.artist,
-                args.artworkUrl,
+                args.artwork,
                 args.gainDb,
                 args.leadMs,
                 args.audioEndMs,
@@ -1508,7 +2121,7 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
                 args.id,
                 args.title,
                 args.artist,
-                args.artworkUrl,
+                args.artwork,
                 args.gainDb,
                 args.leadMs,
                 args.audioEndMs,
@@ -1615,7 +2228,7 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
         runCatching {
             NativeAudioRuntime.setSourceGain(activity.applicationContext, args.gainDb)
         }.onSuccess {
-            invoke.resolve(toJsObject(NativeAudioRuntime.getState(activity.applicationContext)))
+            invoke.resolve(toJsObject(it))
         }.onFailure {
             invoke.reject(it.message ?: "setSourceGain failed")
         }
@@ -1706,6 +2319,17 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
+    fun stop(invoke: Invoke) {
+        runCatching {
+            NativeAudioRuntime.stop(activity.applicationContext)
+        }.onSuccess {
+            invoke.resolve()
+        }.onFailure {
+            invoke.reject(it.message ?: "stop failed")
+        }
+    }
+
+    @Command
     fun dispose(invoke: Invoke) {
         runCatching {
             NativeAudioRuntime.dispose(activity.applicationContext)
@@ -1719,6 +2343,155 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
     override fun onDestroy() {
         if (activeInstance === this) activeInstance = null
         super.onDestroy()
+    }
+
+    // --- Native queue (Fase 1.7) ---------------------------------------------
+
+    @Command
+    fun setQueue(invoke: Invoke) {
+        val args = invoke.parseArgs(SetQueueArgs::class.java)
+        val items = args.items.orEmpty().mapNotNull { item ->
+            val src = item.src?.trim().orEmpty()
+            if (src.isEmpty()) return@mapNotNull null
+            SourceSpec(
+                src = src,
+                id = item.id?.takeIf { it > 0 },
+                title = item.title,
+                artist = item.artist,
+                artwork = item.artwork,
+                gainDb = item.gainDb ?: 0.0,
+                leadMs = item.leadMs ?: 0L,
+                audioEndMs = item.audioEndMs ?: 0L,
+            )
+        }
+        runCatching {
+            NativeAudioRuntime.setQueue(
+                activity.applicationContext,
+                items,
+                args.index ?: -1,
+                args.play ?: false,
+                args.repeat,
+                args.autoplay,
+            )
+        }.onSuccess {
+            invoke.resolve(toJsObject(NativeAudioRuntime.getState(activity.applicationContext)))
+        }.onFailure {
+            invoke.reject(it.message ?: "setQueue failed")
+        }
+    }
+
+    @Command
+    fun setQueueMode(invoke: Invoke) {
+        val args = invoke.parseArgs(SetQueueModeArgs::class.java)
+        runCatching {
+            NativeAudioRuntime.setQueueMode(activity.applicationContext, args.repeat, args.autoplay)
+        }.onSuccess {
+            invoke.resolve(toJsObject(NativeAudioRuntime.getState(activity.applicationContext)))
+        }.onFailure {
+            invoke.reject(it.message ?: "setQueueMode failed")
+        }
+    }
+
+    @Command
+    fun queueNext(invoke: Invoke) {
+        runCatching {
+            NativeAudioRuntime.queueNext(activity.applicationContext)
+        }.onSuccess {
+            invoke.resolve(toJsObject(NativeAudioRuntime.getState(activity.applicationContext)))
+        }.onFailure {
+            invoke.reject(it.message ?: "queueNext failed")
+        }
+    }
+
+    @Command
+    fun queuePrev(invoke: Invoke) {
+        runCatching {
+            NativeAudioRuntime.queuePrev(activity.applicationContext)
+        }.onSuccess {
+            invoke.resolve(toJsObject(NativeAudioRuntime.getState(activity.applicationContext)))
+        }.onFailure {
+            invoke.reject(it.message ?: "queuePrev failed")
+        }
+    }
+
+    /// Resolves once the saved queue (if any) is back in and, in a fresh
+    /// process, its current entry is loaded, paused. The disk read happens
+    /// off the main looper; this only waits for it.
+    @Command
+    fun restoreQueue(invoke: Invoke) {
+        runCatching {
+            NativeAudioRuntime.restoreQueue(activity.applicationContext) {
+                invoke.resolve(toJsObject(NativeAudioRuntime.getState(activity.applicationContext)))
+            }
+        }.onFailure {
+            invoke.reject(it.message ?: "restoreQueue failed")
+        }
+    }
+
+    /// Fase 1.3: whether the system is free to defer or kill this process in
+    /// the background. `false` means the standard Doze/App-Standby throttling
+    /// applies, and on some OEM layers (Samsung's own "sleeping apps" among
+    /// them) the process running the plugin's foreground service can be
+    /// frozen or killed outright — the symptom is playback controls (the
+    /// notification, the lock screen, a car's Bluetooth) that stop working
+    /// until the app is reopened by hand.
+    /// Sync progress in a notification, backed by a `dataSync` foreground
+    /// service (see `SyncService`). Called from Rust, not from the webview.
+    @Command
+    fun showSyncNotice(invoke: Invoke) {
+        val args = invoke.parseArgs(SyncNoticeArgs::class.java)
+        runCatching {
+            SyncService.show(
+                activity.applicationContext,
+                args.title ?: "Syncing",
+                args.text ?: "",
+                args.done ?: 0,
+                args.total ?: 0,
+                args.icon ?: "download",
+            )
+        }.onFailure { Log.w(TAG, "showSyncNotice failed: ${it.message}") }
+        invoke.resolve()
+    }
+
+    @Command
+    fun hideSyncNotice(invoke: Invoke) {
+        runCatching { SyncService.hide(activity.applicationContext) }
+            .onFailure { Log.w(TAG, "hideSyncNotice failed: ${it.message}") }
+        invoke.resolve()
+    }
+
+    @Command
+    fun isIgnoringBatteryOptimizations(invoke: Invoke) {
+        runCatching {
+            val pm = activity.applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+            pm.isIgnoringBatteryOptimizations(activity.applicationContext.packageName)
+        }.onSuccess {
+            val payload = JSObject()
+            payload.put("ignoring", it)
+            invoke.resolve(payload)
+        }.onFailure {
+            invoke.reject(it.message ?: "isIgnoringBatteryOptimizations failed")
+        }
+    }
+
+    /// Opens the system's own exemption dialog. There is no silent way to ask
+    /// for this — `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` always shows the
+    /// user a prompt they have to answer themselves — so this only starts the
+    /// activity; the screen re-reads `isIgnoringBatteryOptimizations` when the
+    /// app comes back to front to learn what they picked.
+    @Command
+    fun requestIgnoreBatteryOptimizations(invoke: Invoke) {
+        runCatching {
+            val intent = Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:${activity.applicationContext.packageName}"),
+            )
+            activity.startActivity(intent)
+        }.onSuccess {
+            invoke.resolve()
+        }.onFailure {
+            invoke.reject(it.message ?: "requestIgnoreBatteryOptimizations failed")
+        }
     }
 
     private fun requestNotificationPermission() {
@@ -1753,6 +2526,9 @@ class NativeAudioPlugin(private val activity: Activity) : Plugin(activity) {
         state.nextTrackId?.let { payload.put("nextTrackId", it) }
         state.outputDeviceId?.let { payload.put("outputDeviceId", it) }
         if (!state.error.isNullOrBlank()) payload.put("error", state.error)
+        payload.put("repeatMode", state.repeatMode)
+        payload.put("queueIndex", state.queueIndex)
+        payload.put("queueLength", state.queueLength)
         return payload
     }
 

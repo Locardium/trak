@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-set-queue-mode"
+description = "Enables the set_queue_mode command without any pre-configured scope."
+commands.allow = ["set_queue_mode"]
+
+[[permission]]
+identifier = "deny-set-queue-mode"
+description = "Denies the set_queue_mode command without any pre-configured scope."
+commands.deny = ["set_queue_mode"]

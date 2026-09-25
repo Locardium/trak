@@ -24,8 +24,10 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// Every `library-changed` makes the frontend reload the ENTIRE library over
@@ -45,7 +47,7 @@ pub fn emit_library_changed(handle: &AppHandle, force: bool) {
     LAST_LIBRARY_EVENT.store(now, Ordering::Relaxed);
     let _ = handle.emit("library-changed", ());
     // Files the sync just brought in have never been measured here.
-    crate::kick_loudness(handle);
+    crate::kick_background(handle);
 }
 
 /// How long to wait for a person to look at the screen and confirm.
@@ -61,9 +63,14 @@ use sway_core::pairing::{platform, Known, CONNECT_TIMEOUT, IO_TIMEOUT};
 
 /// Pending pairing decisions, keyed by peer uid. The connection thread waits
 /// on the receiver; the `confirm_pairing` command sends the answer.
+///
+/// Each entry carries the id of the request that put it there: a request
+/// nobody saw expires after `DECISION_TIMEOUT`, and by then a newer one with
+/// the same device may have taken its place. Cleaning up by uid alone
+/// removed the newer one's sender, which then died in silence (Fase 1.9).
 #[derive(Default)]
 pub struct Pairing {
-    pending: Mutex<HashMap<String, Sender<bool>>>,
+    pending: Mutex<HashMap<String, (u64, Sender<bool>)>>,
     /// Syncs in progress, by uid. With automatic sync there are several
     /// triggers (local change, peer showing up, periodic) that can fire
     /// almost together: two simultaneous runs against the same device
@@ -100,7 +107,7 @@ impl Drop for SyncGuard {
 impl Pairing {
     fn resolve(&self, uid: &str, accepted: bool) -> bool {
         match self.pending.lock().unwrap().remove(uid) {
-            Some(tx) => tx.send(accepted).is_ok(),
+            Some((_, tx)) => tx.send(accepted).is_ok(),
             None => false,
         }
     }
@@ -161,10 +168,47 @@ fn known_state(handle: &AppHandle, uid: &str, pubkey: &[u8]) -> Known {
     core_pair::known_state(&conn, uid, pubkey)
 }
 
+/// Setting that says this device still has to be asked what to sync.
+pub const SCOPE_PROMPT_KEY: &str = "scope_prompt_pending";
+
 fn store_device(handle: &AppHandle, uid: &str, name: &str, platform: &str, pubkey: &[u8]) -> Result<()> {
     let state = handle.state::<AppState>();
     let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
-    core_pair::store_device(&conn, uid, name, platform, pubkey)
+    let first = is_first_pairing(&conn)?;
+    core_pair::store_device(&conn, uid, name, platform, pubkey)?;
+    if first {
+        // The first link of a device used to start pulling the whole
+        // library right away, with the scope still at its default of
+        // "everything": picking playlists afterwards meant waiting for all of
+        // it to arrive and then deleting by hand (Fase 1.8). Now it starts as
+        // "selected" with nothing marked — which any version of Sway already
+        // reads as "no files" — so the first sync only brings playlists and
+        // metadata, exactly what's needed to choose from, and the Sync screen
+        // asks the question.
+        //
+        // Only the app does this: the server shares `core_pair::store_device`
+        // and is an archive, it takes everything.
+        let me = db::this_device_uid(&conn)?;
+        sway_core::scope::set_mode(&conn, &me, sway_core::scope::Mode::Selected)?;
+        db::set_setting(&conn, SCOPE_PROMPT_KEY, "1")?;
+    }
+    Ok(())
+}
+
+/// Never linked to anything, and never made a scope choice. A device that
+/// already chose (a row in `device_sync`) keeps its choice on a new link.
+fn is_first_pairing(conn: &rusqlite::Connection) -> Result<bool> {
+    let devices: i64 = conn.query_row("SELECT COUNT(*) FROM devices", [], |r| r.get(0))?;
+    if devices > 0 {
+        return Ok(false);
+    }
+    let me = db::this_device_uid(conn)?;
+    let chosen: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM device_sync WHERE device_uid = ?1",
+        [&me],
+        |r| r.get(0),
+    )?;
+    Ok(chosen == 0)
 }
 
 fn library_counts(handle: &AppHandle) -> (i64, i64) {
@@ -188,21 +232,57 @@ fn me(handle: &AppHandle) -> Result<(String, String)> {
 // User confirmation
 // ---------------------------------------------------------------------------
 
+/// How the wait for the person ended.
+enum Decision {
+    /// The person here answered (or nobody did before the timeout: `false`).
+    Here(bool),
+    /// The other side sent something first: its `Reject` because its own
+    /// dialog was closed, or its answer. It hasn't been read yet.
+    PeerSpoke,
+}
+
+/// How often the wait looks at the socket for a message from the peer.
+const WATCH_EVERY: Duration = Duration::from_millis(250);
+
 /// Shows the code and waits for the person to decide. The timeout prevents a
 /// thread (and a connection) from being left hanging if nobody looks at the
 /// screen.
-fn ask_user(handle: &AppHandle, ev: PairingRequestEvent) -> bool {
+///
+/// With `watch`, the wait also ends as soon as the peer sends something:
+/// otherwise a dialog closed on the other device left this one showing a
+/// dead code for up to two minutes.
+fn ask_user(handle: &AppHandle, ev: PairingRequestEvent, watch: Option<&Session>) -> Decision {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = channel();
     {
         let state = handle.state::<AppState>();
-        state.pairing.pending.lock().unwrap().insert(ev.uid.clone(), tx);
+        state.pairing.pending.lock().unwrap().insert(ev.uid.clone(), (id, tx));
     }
     let uid = ev.uid.clone();
     let _ = handle.emit("pairing-request", ev);
-    let answer = rx.recv_timeout(DECISION_TIMEOUT).unwrap_or(false);
+    let deadline = Instant::now() + DECISION_TIMEOUT;
+    let decision = loop {
+        match rx.recv_timeout(WATCH_EVERY) {
+            Ok(accepted) => break Decision::Here(accepted),
+            Err(RecvTimeoutError::Disconnected) => break Decision::Here(false),
+            Err(RecvTimeoutError::Timeout) => {
+                if watch.is_some_and(|s| s.peer_has_spoken()) {
+                    break Decision::PeerSpoke;
+                }
+                if Instant::now() >= deadline {
+                    break Decision::Here(false);
+                }
+            }
+        }
+    };
     let state = handle.state::<AppState>();
-    state.pairing.pending.lock().unwrap().remove(&uid);
-    answer
+    let mut pending = state.pairing.pending.lock().unwrap();
+    // Only our own entry: a newer request for the same device may be there.
+    if pending.get(&uid).is_some_and(|(owner, _)| *owner == id) {
+        pending.remove(&uid);
+    }
+    decision
 }
 
 /// Called by the `confirm_pairing` command from the UI.
@@ -266,7 +346,7 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                 Known::Trusted | Known::Unknown => {}
             }
 
-            let accepted_here = ask_user(
+            let decision = ask_user(
                 handle,
                 PairingRequestEvent {
                     uid: uid.clone(),
@@ -275,7 +355,21 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                     code: sess.code.clone(),
                     incoming: true,
                 },
+                Some(&sess),
             );
+            let accepted_here = match decision {
+                Decision::Here(accepted) => accepted,
+                // The caller says nothing until it hears our answer, except
+                // to give up: its dialog was closed or rejected.
+                Decision::PeerSpoke => {
+                    let reason = match sess.recv() {
+                        Ok(Msg::Reject { reason }) => reason,
+                        _ => "cancelled on the other device".to_string(),
+                    };
+                    emit_done(handle, &uid, &name, false, Some(&reason));
+                    return Ok(());
+                }
+            };
             sess.send(&Msg::PairResponse {
                 accepted: accepted_here,
             })?;
@@ -339,7 +433,10 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
             // The totals are useful to whoever has no screen (the server,
             // see `crates/server/src/serve.rs`); here what happened has
             // already gone out through the progress events.
-            engine::serve_requests(&crate::AppHost(handle), &mut sess, &uid).map(|_| ())
+            let served = engine::serve_requests(&crate::AppHost(handle), &mut sess, &uid);
+            // The other side ran this one: its end is the session's end.
+            crate::sync_notice::end(handle, &uid);
+            served.map(|_| ())
         }
         // The other side removed us from its devices. Only accepted if its
         // key is the one we had stored — i.e. if the handshake proved it's
@@ -387,7 +484,7 @@ pub fn connect_peer(handle: AppHandle, uid: String) {
     });
 }
 
-fn peer_name(handle: &AppHandle, uid: &str) -> String {
+pub(crate) fn peer_name(handle: &AppHandle, uid: &str) -> String {
     handle
         .state::<AppState>()
         .peers
@@ -475,16 +572,38 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
                 // (Phase 6.3).
                 token: None,
             })?;
-            let accepted_here = ask_user(
-                handle,
-                PairingRequestEvent {
-                    uid: uid.to_string(),
-                    name: name.clone(),
-                    platform: String::new(),
-                    code: sess.code.clone(),
-                    incoming: false,
+            let ev = PairingRequestEvent {
+                uid: uid.to_string(),
+                name: name.clone(),
+                platform: String::new(),
+                code: sess.code.clone(),
+                incoming: false,
+            };
+            // The other side may answer before the person here does. A "no"
+            // ends it right away; a "yes" is kept and the wait goes on,
+            // without watching: the peer is silent until our `PairAck`.
+            let mut accepted_there = None;
+            let accepted_here = match ask_user(handle, ev.clone(), Some(&sess)) {
+                Decision::Here(accepted) => accepted,
+                Decision::PeerSpoke => match sess.recv()? {
+                    Msg::PairResponse { accepted: true } => {
+                        accepted_there = Some(true);
+                        match ask_user(handle, ev, None) {
+                            Decision::Here(accepted) => accepted,
+                            Decision::PeerSpoke => false,
+                        }
+                    }
+                    Msg::PairResponse { accepted: false } => {
+                        emit_done(handle, uid, &name, false, Some("rejected on the other device"));
+                        return Ok(());
+                    }
+                    Msg::Reject { reason } => {
+                        emit_done(handle, uid, &name, false, Some(&reason));
+                        return Ok(());
+                    }
+                    other => return Err(anyhow!("expected PairResponse, got {other:?}")),
                 },
-            );
+            };
             if !accepted_here {
                 // Cut it off here without waiting for the other side's
                 // answer: there could be someone looking at the screen until
@@ -495,13 +614,16 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
                 emit_done(handle, uid, &name, false, Some("rejected on this device"));
                 return Ok(());
             }
-            let accepted_there = match sess.recv()? {
-                Msg::PairResponse { accepted } => accepted,
-                Msg::Reject { reason } => {
-                    emit_done(handle, uid, &name, false, Some(&reason));
-                    return Ok(());
-                }
-                other => return Err(anyhow!("expected PairResponse, got {other:?}")),
+            let accepted_there = match accepted_there {
+                Some(accepted) => accepted,
+                None => match sess.recv()? {
+                    Msg::PairResponse { accepted } => accepted,
+                    Msg::Reject { reason } => {
+                        emit_done(handle, uid, &name, false, Some(&reason));
+                        return Ok(());
+                    }
+                    other => return Err(anyhow!("expected PairResponse, got {other:?}")),
+                },
             };
             sess.send(&Msg::PairAck {
                 accepted: accepted_here,
@@ -513,7 +635,16 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
             store_device(handle, uid, &name, &platform_of(handle, uid), &sess.peer_pubkey)?;
             emit_done(handle, uid, &name, true, None);
             let _ = handle.emit("peers-changed", ());
-            exchange_hello(handle, &mut sess, uid, &name)
+            exchange_hello(handle, &mut sess, uid, &name)?;
+            drop(sess);
+            // Nothing else starts the first sync of a new link: discovery
+            // saw this device before it was paired (and skipped it), and the
+            // probe only reacts to offline -> online. Without this the
+            // playlists to choose from (1.8) took up to the periodic pass to
+            // show up. Only the side that asked does it, so the two don't
+            // start one against each other.
+            crate::autosync::peer_came_online(handle, uid);
+            Ok(())
         }
     }
 }
@@ -852,7 +983,9 @@ pub(crate) fn run_sync_blocking(handle: AppHandle, uid: String, auto: bool) {
             return;
         };
         let name = peer_name(&handle, &uid);
-        match sync_inner(&handle, &uid) {
+        let result = sync_inner(&handle, &uid);
+        crate::sync_notice::end(&handle, &uid);
+        match result {
             Ok(engine::SyncResult { received, sent, failed, bytes, organized }) => {
                 log::info!(
                     "[sync] {name}: {received} received, {sent} sent, {failed} failed, {organized} organization"

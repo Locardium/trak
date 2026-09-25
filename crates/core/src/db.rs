@@ -83,6 +83,9 @@ CREATE TABLE IF NOT EXISTS tracks (
     -- It doubles as the has-this-been-analyzed marker: everything the
     -- analyzer measures is written in the same pass.
     loudness_lufs REAL,
+    -- Loudest sample, dBFS (0 = full scale), measured in the same pass. What
+    -- keeps normalization from boosting a track into clipping.
+    peak_db REAL,
     -- Where the audio actually starts and ends, as absolute positions in ms.
     -- This is what makes gapless gapless: appending one track after another
     -- inserts no gap, but the encoder padding and the recorded silence baked
@@ -325,6 +328,21 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
 /// touch a table that's already there, so new columns get added here.
 /// Idempotent: on a freshly created database SCHEMA already brings them and this does nothing.
 fn migrate(conn: &Connection) -> Result<()> {
+    // Playlist memberships of tracks that don't exist on this device (a
+    // device that syncs only some playlists never gets a row in `tracks` for
+    // the rest). Only so each playlist's count is the real one:
+    // `playlist_tracks` needs the track row, and without this every
+    // unselected playlist read 0 (1.8). The other side resends them on every
+    // sync; tombstones clear them. Here and not in SCHEMA so an old database
+    // being migrated has it too.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS parked_memberships (
+             playlist_uid TEXT NOT NULL,
+             track_uid    TEXT NOT NULL,
+             added_at     INTEGER NOT NULL DEFAULT 0,
+             PRIMARY KEY (playlist_uid, track_uid)
+         )",
+    )?;
     // `position` INTEGER -> fractional `rank` (see rank.rs). The old column
     // is left where it is (it has a DEFAULT, doesn't get in the way of new INSERTs);
     // removing it would force rebuilding the whole table for no gain.
@@ -351,6 +369,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         // Playback levels: manual trim and what the analyzer measures.
         ("tracks", "gain_db REAL NOT NULL DEFAULT 0"),
         ("tracks", "loudness_lufs REAL"),
+        ("tracks", "peak_db REAL"),
         ("tracks", "lead_silence_ms INTEGER"),
         ("tracks", "audio_end_ms INTEGER"),
         ("playlists", "uid TEXT"),
@@ -526,6 +545,8 @@ pub struct TrackPlayback {
     pub gain_db: f64,
     /// Measured loudness. `None` = not analyzed yet.
     pub loudness_lufs: Option<f64>,
+    /// Loudest sample, dBFS. `None` = not analyzed yet.
+    pub peak_db: Option<f64>,
     /// Absolute positions in ms where the audio starts and ends.
     /// `None` = not analyzed.
     pub lead_silence_ms: Option<i64>,
@@ -534,15 +555,16 @@ pub struct TrackPlayback {
 
 pub fn track_playback(conn: &Connection, id: i64) -> Result<TrackPlayback> {
     conn.query_row(
-        "SELECT gain_db, loudness_lufs, lead_silence_ms, audio_end_ms
+        "SELECT gain_db, loudness_lufs, peak_db, lead_silence_ms, audio_end_ms
          FROM tracks WHERE id = ?1",
         [id],
         |r| {
             Ok(TrackPlayback {
                 gain_db: r.get(0)?,
                 loudness_lufs: r.get(1)?,
-                lead_silence_ms: r.get(2)?,
-                audio_end_ms: r.get(3)?,
+                peak_db: r.get(2)?,
+                lead_silence_ms: r.get(3)?,
+                audio_end_ms: r.get(4)?,
             })
         },
     )
@@ -563,14 +585,15 @@ pub fn set_track_analysis(
     conn: &Connection,
     id: i64,
     lufs: f64,
+    peak_db: f64,
     lead_ms: i64,
     audio_end_ms: i64,
 ) -> Result<()> {
     conn.execute(
         "UPDATE tracks
-            SET loudness_lufs = ?2, lead_silence_ms = ?3, audio_end_ms = ?4
+            SET loudness_lufs = ?2, peak_db = ?3, lead_silence_ms = ?4, audio_end_ms = ?5
           WHERE id = ?1",
-        rusqlite::params![id, lufs, lead_ms, audio_end_ms],
+        rusqlite::params![id, lufs, peak_db, lead_ms, audio_end_ms],
     )?;
     Ok(())
 }
@@ -587,6 +610,7 @@ pub fn set_track_analysis(
 /// selective sync means a device can hold thousands of rows with no audio
 /// behind them.
 const NEEDS_ANALYSIS: &str = "(loudness_lufs IS NULL
+                              OR peak_db IS NULL
                               OR lead_silence_ms IS NULL
                               OR audio_end_ms IS NULL)
                              AND local_state = 'present'";
@@ -615,7 +639,7 @@ pub fn analysis_pending_count(conn: &Connection) -> Result<i64> {
 pub fn clear_analysis(conn: &Connection) -> Result<usize> {
     let n = conn.execute(
         "UPDATE tracks
-            SET loudness_lufs = NULL, lead_silence_ms = NULL, audio_end_ms = NULL",
+            SET loudness_lufs = NULL, peak_db = NULL, lead_silence_ms = NULL, audio_end_ms = NULL",
         [],
     )?;
     Ok(n)
@@ -757,7 +781,17 @@ pub fn set_auto_sync_xml(conn: &Connection, enabled: bool) -> Result<()> {
 /// track down so far that the whole app just sounded quiet. -14 is the level
 /// the streaming services settled on for the same reason, and it still leaves
 /// 14 dB of headroom.
-pub const TARGET_LUFS: f64 = -6.0;
+pub const TARGET_LUFS: f64 = -14.0;
+
+/// Where normalization stops boosting: the loudest sample may reach this,
+/// not more. -1 and not 0 because the peak is measured on samples, and the
+/// real waveform between them (and a lossy re-encode) can go a bit higher.
+pub const PEAK_CEILING_DB: f64 = -1.0;
+
+/// How far normalization may boost a track whose peak isn't known yet
+/// (measured by a build that didn't record it): enough to matter, too little
+/// to clip anything but a brickwalled master.
+pub const UNKNOWN_PEAK_MAX_BOOST_DB: f64 = 3.0;
 
 /// Ceiling on how much anything may be turned **up**. Without it one badly
 /// measured track (an ambient intro measured as the whole track) asks for
@@ -862,13 +896,29 @@ impl From<StoredPrefs> for PlaybackPrefs {
 /// The two add up rather than one replacing the other, which is how a DJ
 /// mixer behaves: auto-gain sets the baseline, the trim knob is what you do
 /// on top of it when the baseline is wrong for this room.
-pub fn playback_gain_db(gain_db: f64, loudness_lufs: Option<f64>, normalize: bool) -> f64 {
-    let auto = match (normalize, loudness_lufs) {
-        (true, Some(lufs)) => TARGET_LUFS - lufs,
+///
+/// With normalization on, a boost never pushes the loudest sample past
+/// `PEAK_CEILING_DB` (3.1: it used to boost hot files straight into
+/// clipping). Only boosts are limited: turning a track down can't clip, and
+/// normalization never turns one down just for having loud peaks. With it off
+/// the trim is the user's own call and is left alone.
+pub fn playback_gain_db(
+    gain_db: f64,
+    loudness_lufs: Option<f64>,
+    peak_db: Option<f64>,
+    normalize: bool,
+) -> f64 {
+    let Some(lufs) = loudness_lufs.filter(|_| normalize) else {
         // Not measured yet (or normalization off): the trim alone decides.
-        _ => 0.0,
+        return gain_db.clamp(-MAX_CUT_DB, MAX_GAIN_DB);
     };
-    (gain_db + auto).clamp(-MAX_CUT_DB, MAX_GAIN_DB)
+    let gain = gain_db + TARGET_LUFS - lufs;
+    let headroom = match peak_db {
+        Some(peak) => (PEAK_CEILING_DB - peak).max(0.0),
+        None => UNKNOWN_PEAK_MAX_BOOST_DB,
+    };
+    let gain = if gain > 0.0 { gain.min(headroom) } else { gain };
+    gain.clamp(-MAX_CUT_DB, MAX_GAIN_DB)
 }
 
 /// dB to the linear multiplier the audio sink wants.
@@ -921,8 +971,14 @@ pub fn list_playlists(conn: &Connection) -> Result<Vec<PlaylistNode>> {
         // correlated per row: that used to mean 2N scans of playlist_tracks
         // per tree refresh, and the tree refreshes on every library
         // change.
+        //
+        // The total also counts memberships parked for tracks that never
+        // reached this device (see `parked_memberships`): the count is the
+        // playlist's, not what happens to be downloaded here. A parked pair
+        // whose track did arrive but isn't linked yet is skipped so it isn't
+        // counted twice.
         "SELECT p.id, p.uid, p.name, p.kind, p.parent_id,
-                COALESCE(c.total, 0), COALESCE(c.present_rows, 0)
+                COALESCE(c.total, 0) + COALESCE(k.parked, 0), COALESCE(c.present_rows, 0)
          FROM playlists p
          LEFT JOIN (
              SELECT pt.playlist_id AS pid,
@@ -932,6 +988,16 @@ pub fn list_playlists(conn: &Connection) -> Result<Vec<PlaylistNode>> {
                JOIN tracks t ON t.id = pt.track_id
               GROUP BY pt.playlist_id
          ) c ON c.pid = p.id
+         LEFT JOIN (
+             SELECT pm.playlist_uid AS puid, COUNT(*) AS parked
+               FROM parked_memberships pm
+              WHERE NOT EXISTS (
+                    SELECT 1 FROM playlist_tracks pt
+                      JOIN tracks t ON t.id = pt.track_id
+                      JOIN playlists pp ON pp.id = pt.playlist_id
+                     WHERE pp.uid = pm.playlist_uid AND t.uid = pm.track_uid)
+              GROUP BY pm.playlist_uid
+         ) k ON k.puid = p.uid
          ORDER BY p.parent_id, p.rank",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -1291,28 +1357,49 @@ mod tests {
     /// gets a say, even on a track that was measured.
     #[test]
     fn with_normalization_off_only_the_manual_trim_counts() {
-        assert_eq!(playback_gain_db(0.0, Some(-30.0), false), 0.0);
-        assert_eq!(playback_gain_db(3.5, Some(-30.0), false), 3.5);
-        assert_eq!(playback_gain_db(-6.0, None, false), -6.0);
+        assert_eq!(playback_gain_db(0.0, Some(-30.0), ROOM, false), 0.0);
+        assert_eq!(playback_gain_db(3.5, Some(-30.0), ROOM, false), 3.5);
+        assert_eq!(playback_gain_db(-6.0, None, ROOM, false), -6.0);
+    }
+
+    /// Peak for tests about loudness alone: low enough that no boost here
+    /// hits the ceiling.
+    const ROOM: Option<f64> = Some(-30.0);
+
+    /// Normalization stops boosting where the loudest sample would pass the
+    /// ceiling (3.1: hot files were boosted straight into clipping), but a
+    /// cut is never limited by it.
+    #[test]
+    fn a_boost_stops_at_the_peak_ceiling() {
+        // -20 LUFS wants +6; a peak at -3 dBFS leaves room for +2 only.
+        assert_eq!(playback_gain_db(0.0, Some(-20.0), Some(-3.0), true), 2.0);
+        // Already at the ceiling: no boost at all, but no cut either.
+        assert_eq!(playback_gain_db(0.0, Some(-20.0), Some(0.0), true), 0.0);
+        // A loud track is still brought down, whatever its peak.
+        assert_eq!(playback_gain_db(0.0, Some(-8.0), Some(0.0), true), -6.0);
+        // Peak not measured yet: a small boost at most.
+        assert_eq!(playback_gain_db(0.0, Some(-20.0), None, true), UNKNOWN_PEAK_MAX_BOOST_DB);
+        // With normalization off the trim is the user's, peak or not.
+        assert_eq!(playback_gain_db(5.0, Some(-20.0), Some(0.0), false), 5.0);
     }
 
     /// A track quieter than the target gets pushed up by exactly the
     /// difference, and one louder gets pulled down.
     #[test]
     fn normalization_moves_the_track_to_the_target_level() {
-        assert_eq!(playback_gain_db(0.0, Some(TARGET_LUFS), true), 0.0);
+        assert_eq!(playback_gain_db(0.0, Some(TARGET_LUFS), ROOM, true), 0.0);
         // -22 LUFS against a -14 target: 8 dB short.
-        assert_eq!(playback_gain_db(0.0, Some(-22.0), true), 8.0);
+        assert_eq!(playback_gain_db(0.0, Some(-22.0), ROOM, true), 8.0);
         // -8 LUFS is 6 dB too loud.
-        assert_eq!(playback_gain_db(0.0, Some(-8.0), true), -6.0);
+        assert_eq!(playback_gain_db(0.0, Some(-8.0), ROOM, true), -6.0);
     }
 
     /// The trim rides on top of normalization rather than replacing it —
     /// that's the point of having both, and it's how a mixer behaves.
     #[test]
     fn the_trim_adds_on_top_of_normalization() {
-        assert_eq!(playback_gain_db(2.0, Some(-18.0), true), 6.0);
-        assert_eq!(playback_gain_db(-2.0, Some(-18.0), true), 2.0);
+        assert_eq!(playback_gain_db(2.0, Some(-18.0), ROOM, true), 6.0);
+        assert_eq!(playback_gain_db(-2.0, Some(-18.0), ROOM, true), 2.0);
     }
 
     /// An unmeasured track is left alone rather than guessed at: asking for a
@@ -1320,16 +1407,16 @@ mod tests {
     /// no one intended.
     #[test]
     fn an_unmeasured_track_is_not_corrected() {
-        assert_eq!(playback_gain_db(0.0, None, true), 0.0);
-        assert_eq!(playback_gain_db(4.0, None, true), 4.0);
+        assert_eq!(playback_gain_db(0.0, None, ROOM, true), 0.0);
+        assert_eq!(playback_gain_db(4.0, None, ROOM, true), 4.0);
     }
 
     /// One badly measured track (a long quiet intro read as the whole thing)
     /// must not be able to ask for a level that destroys the speakers.
     #[test]
     fn the_boost_is_capped() {
-        assert_eq!(playback_gain_db(0.0, Some(-60.0), true), MAX_GAIN_DB);
-        assert_eq!(playback_gain_db(100.0, None, false), MAX_GAIN_DB);
+        assert_eq!(playback_gain_db(0.0, Some(-60.0), ROOM, true), MAX_GAIN_DB);
+        assert_eq!(playback_gain_db(100.0, None, ROOM, false), MAX_GAIN_DB);
     }
 
     /// Turning down is capped much further out, because it cannot clip and a
@@ -1340,9 +1427,9 @@ mod tests {
     fn a_loud_master_is_brought_all_the_way_down() {
         // A real track out of this library: -4.2 LUFS wants -9.8 dB against
         // the -14 reference.
-        assert!((playback_gain_db(0.0, Some(-4.2), true) - (-9.8)).abs() < 1e-9);
+        assert!((playback_gain_db(0.0, Some(-4.2), ROOM, true) - (-9.8)).abs() < 1e-9);
         // The floor is still there for a nonsense measurement.
-        assert_eq!(playback_gain_db(0.0, Some(40.0), true), -MAX_CUT_DB);
+        assert_eq!(playback_gain_db(0.0, Some(40.0), ROOM, true), -MAX_CUT_DB);
     }
 
     #[test]
@@ -1363,12 +1450,13 @@ mod tests {
         assert_eq!(track_playback(&conn, a).unwrap(), TrackPlayback::default());
 
         set_track_gain(&conn, a, 4.5).unwrap();
-        set_track_analysis(&conn, a, -21.0, 120, 340).unwrap();
+        set_track_analysis(&conn, a, -21.0, -1.0, 120, 340).unwrap();
         assert_eq!(
             track_playback(&conn, a).unwrap(),
             TrackPlayback {
                 gain_db: 4.5,
                 loudness_lufs: Some(-21.0),
+                peak_db: Some(-1.0),
                 lead_silence_ms: Some(120),
                 audio_end_ms: Some(340),
             }
@@ -1385,7 +1473,7 @@ mod tests {
         let here = add_track(&conn, "/music/here.flac");
         let done = add_track(&conn, "/music/done.flac");
         let gone = add_track(&conn, "/music/gone.flac");
-        set_track_analysis(&conn, done, -18.0, 0, 0).unwrap();
+        set_track_analysis(&conn, done, -18.0, -1.0, 0, 0).unwrap();
         conn.execute("UPDATE tracks SET local_state = 'absent' WHERE id = ?1", [gone])
             .unwrap();
 
@@ -1394,7 +1482,7 @@ mod tests {
         assert_eq!(pending[0].0, here);
         assert_eq!(analysis_pending_count(&conn).unwrap(), 1);
 
-        set_track_analysis(&conn, here, -20.0, 0, 0).unwrap();
+        set_track_analysis(&conn, here, -20.0, -1.0, 0, 0).unwrap();
         assert_eq!(analysis_pending_count(&conn).unwrap(), 0);
     }
 
@@ -1413,7 +1501,7 @@ mod tests {
         assert_eq!(analysis_pending_count(&conn).unwrap(), 1);
         assert_eq!(tracks_needing_analysis(&conn, 10).unwrap()[0].0, old);
 
-        set_track_analysis(&conn, old, -8.0, 40, 900).unwrap();
+        set_track_analysis(&conn, old, -8.0, -1.0, 40, 900).unwrap();
         assert_eq!(analysis_pending_count(&conn).unwrap(), 0);
     }
 
@@ -1424,8 +1512,8 @@ mod tests {
         let conn = mem();
         let a = add_track(&conn, "/music/a.flac");
         let b = add_track(&conn, "/music/b.flac");
-        set_track_analysis(&conn, a, -20.0, 100, 200).unwrap();
-        set_track_analysis(&conn, b, TARGET_LUFS, 0, 0).unwrap();
+        set_track_analysis(&conn, a, -20.0, -1.0, 100, 200).unwrap();
+        set_track_analysis(&conn, b, TARGET_LUFS, -1.0, 0, 0).unwrap();
         set_track_gain(&conn, a, 3.0).unwrap();
         assert_eq!(analysis_pending_count(&conn).unwrap(), 0);
 

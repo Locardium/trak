@@ -23,6 +23,14 @@ Default permissions for the plugin
 - `allow-set-crossfade`
 - `allow-list-output-devices`
 - `allow-set-output-device`
+- `allow-is-ignoring-battery-optimizations`
+- `allow-request-ignore-battery-optimizations`
+- `allow-set-queue`
+- `allow-set-queue-mode`
+- `allow-queue-next`
+- `allow-queue-prev`
+- `allow-restore-queue`
+- `allow-stop`
 
 ## Permission Table
 
@@ -166,6 +174,32 @@ Denies the initialize command without any pre-configured scope.
 <tr>
 <td>
 
+`native-audio:allow-is-ignoring-battery-optimizations`
+
+</td>
+<td>
+
+Enables the is_ignoring_battery_optimizations command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-is-ignoring-battery-optimizations`
+
+</td>
+<td>
+
+Denies the is_ignoring_battery_optimizations command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `native-audio:allow-list-output-devices`
 
 </td>
@@ -244,6 +278,58 @@ Denies the play command without any pre-configured scope.
 <tr>
 <td>
 
+`native-audio:allow-queue-next`
+
+</td>
+<td>
+
+Enables the queue_next command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-queue-next`
+
+</td>
+<td>
+
+Denies the queue_next command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-queue-prev`
+
+</td>
+<td>
+
+Enables the queue_prev command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-queue-prev`
+
+</td>
+<td>
+
+Denies the queue_prev command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `native-audio:allow-register-listener`
 
 </td>
@@ -289,6 +375,58 @@ Enables the remove_listener command without any pre-configured scope.
 <td>
 
 Denies the remove_listener command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-request-ignore-battery-optimizations`
+
+</td>
+<td>
+
+Enables the request_ignore_battery_optimizations command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-request-ignore-battery-optimizations`
+
+</td>
+<td>
+
+Denies the request_ignore_battery_optimizations command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-restore-queue`
+
+</td>
+<td>
+
+Enables the restore_queue command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-restore-queue`
+
+</td>
+<td>
+
+Denies the restore_queue command without any pre-configured scope.
 
 </td>
 </tr>
@@ -393,6 +531,58 @@ Enables the set_output_device command without any pre-configured scope.
 <td>
 
 Denies the set_output_device command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-set-queue`
+
+</td>
+<td>
+
+Enables the set_queue command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-set-queue`
+
+</td>
+<td>
+
+Denies the set_queue command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-set-queue-mode`
+
+</td>
+<td>
+
+Enables the set_queue_mode command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-set-queue-mode`
+
+</td>
+<td>
+
+Denies the set_queue_mode command without any pre-configured scope.
 
 </td>
 </tr>
@@ -523,6 +713,32 @@ Enables the skip_to_next command without any pre-configured scope.
 <td>
 
 Denies the skip_to_next command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:allow-stop`
+
+</td>
+<td>
+
+Enables the stop command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`native-audio:deny-stop`
+
+</td>
+<td>
+
+Denies the stop command without any pre-configured scope.
 
 </td>
 </tr>

@@ -110,7 +110,7 @@ pub struct Tombstone {
 
 /// A playlist marked (or unmarked) for a device. Travels because scope can
 /// be edited from either side — see `scope.rs`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScopeEntry {
     pub device_uid: String,
@@ -123,7 +123,7 @@ pub struct ScopeEntry {
 /// whole library or just what's marked. It's a property of the device, not
 /// of the link — between two devices, A → B happens only if A sends and B
 /// receives, and both sides hold both rows.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSync {
     pub device_uid: String,
@@ -265,6 +265,28 @@ fn wins(a: &TrackEntry, b: &TrackEntry) -> bool {
 /// - Selective scope filters **only files**: playlists, order, and metadata
 ///   travel in full regardless. A track outside of scope still shows up in
 ///   the other device's library, just without a file.
+/// Which of `remote`'s tracks this device wants right now: the same rule
+/// `plan` applies, but with this device's scope rows read fresh instead of
+/// taken from the manifest built when the sync started.
+///
+/// The pull loop checks it between files, because the scope can change while
+/// the loop runs — the user unticks a playlist on the phone halfway through a
+/// first sync — and a plan made at the start would otherwise download all of
+/// it anyway. Playlists and memberships come from `remote` only: the files
+/// being pulled are the remote's tracks, and the local manifest would mean
+/// walking the whole library on every file. `None` = everything.
+pub fn wanted_now(
+    device_uid: &str,
+    local_entries: &[ScopeEntry],
+    local_modes: &[DeviceSync],
+    remote: &Manifest,
+) -> Option<HashSet<String>> {
+    let entries = crate::scope::merge_entries(local_entries, &remote.scopes);
+    let modes = crate::scope::merge_device_sync(local_modes, &remote.device_sync);
+    let scope = crate::scope::from_entries(device_uid, &entries, &modes);
+    crate::scope::tracks_in_scope(&remote.playlists, &remote.memberships, &scope)
+}
+
 pub fn plan(local: &Manifest, remote: &Manifest) -> Plan {
     let mut p = Plan::default();
 
@@ -1027,6 +1049,52 @@ mod tests {
         assert_eq!(p.pull_files.len(), 1);
         assert_eq!(p.pull_files[0].track_uid, "t1");
         assert_eq!(p.out_of_scope_in, 1);
+    }
+
+    /// The scope read mid-sync: switching the phone from "all" to one marked
+    /// playlist has to shrink what's still to be pulled, using the remote's
+    /// playlists (the local ones haven't arrived yet on a first sync).
+    #[test]
+    fn wanted_now_follows_scope_changes_made_during_the_sync() {
+        let mut remote = named("pc", manifest(vec![track("t1", Some("h1"), 0), track("t2", Some("h2"), 0)]));
+        remote.playlists.push(PlaylistEntry {
+            uid: "sets".into(),
+            name: "Sets".into(),
+            kind: "playlist".into(),
+            parent_uid: None,
+            rank: "V".into(),
+            updated_at: 0,
+        });
+        remote.memberships.push(Membership {
+            playlist_uid: "sets".into(),
+            track_uid: "t1".into(),
+            rank: "V".into(),
+            added_at: 0,
+        });
+
+        // No rows yet: "all".
+        assert!(wanted_now("celu", &[], &[], &remote).is_none());
+
+        // Switched to "selected" with nothing marked: nothing is wanted.
+        let modes = vec![DeviceSync {
+            device_uid: "celu".into(),
+            mode: "selected".into(),
+            direction: "both".into(),
+            updated_at: 10,
+        }];
+        let wanted = wanted_now("celu", &[], &modes, &remote).expect("selected");
+        assert!(wanted.is_empty());
+
+        // "Sets" marked: only its track.
+        let entries = vec![ScopeEntry {
+            device_uid: "celu".into(),
+            playlist_uid: "sets".into(),
+            selected: true,
+            updated_at: 20,
+        }];
+        let wanted = wanted_now("celu", &entries, &modes, &remote).expect("selected");
+        assert!(wanted.contains("t1"));
+        assert!(!wanted.contains("t2"));
     }
 
     /// The peer's scope decides what gets sent to it: unmarking a playlist

@@ -55,7 +55,15 @@ fn resume_offset(music_dir: &Path, hash: &str) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Sends `path` starting at `offset`. The receiver already knows the expected hash.
-pub fn send_file(sess: &mut Session, path: &Path, offset: u64, hash: &str) -> Result<()> {
+/// `progress(sent, total)` goes after every chunk, like on the receiving side:
+/// without it the sending device's bar sat at 0 for the whole file.
+pub fn send_file(
+    sess: &mut Session,
+    path: &Path,
+    offset: u64,
+    hash: &str,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<()> {
     let mut f = std::fs::File::open(path)?;
     let total = f.metadata()?.len();
     if offset > total {
@@ -67,12 +75,15 @@ pub fn send_file(sess: &mut Session, path: &Path, offset: u64, hash: &str) -> Re
     })?;
 
     let mut buf = vec![0u8; CHUNK];
+    let mut sent = offset;
     loop {
         let n = f.read(&mut buf)?;
         if n == 0 {
             break;
         }
         sess.send_bytes(&buf[..n])?;
+        sent += n as u64;
+        progress(sent, total);
     }
     sess.send(&Msg::BlobEnd {
         hash: hash.to_string(),
@@ -183,11 +194,14 @@ pub fn receive_file(
 }
 
 /// Requests a file and receives it, resuming if something was already downloaded.
+/// `(index, of)` is its place in the run, sent along so the other side's
+/// progress reads "3 of 128" too.
 pub fn pull_file(
     sess: &mut Session,
     music_dir: &Path,
     hash: &str,
     filename: &str,
+    (index, of): (usize, usize),
     progress: &mut dyn FnMut(u64, u64),
     mark_expected: &mut dyn FnMut(&Path),
 ) -> Result<Received> {
@@ -198,6 +212,8 @@ pub fn pull_file(
     sess.send(&Msg::BlobReq {
         hash: hash.to_string(),
         offset,
+        index,
+        of,
     })?;
     receive_file(sess, music_dir, hash, filename, offset > 0, progress, mark_expected)
 }
@@ -406,7 +422,7 @@ mod tests {
         let h = hash.clone();
         let src2 = src.clone();
         let sender = std::thread::spawn(move || {
-            send_file(&mut server, &src2, 0, &h).unwrap();
+            send_file(&mut server, &src2, 0, &h, &mut |_, _| {}).unwrap();
         });
         let got = receive_file(
             &mut client,
@@ -567,13 +583,13 @@ mod tests {
         let sender = std::thread::spawn(move || {
             match server.recv().unwrap() {
                 Msg::BlobReq { offset, .. } => {
-                    send_file(&mut server, &src, offset, &h).unwrap();
+                    send_file(&mut server, &src, offset, &h, &mut |_, _| {}).unwrap();
                 }
                 other => panic!("unexpected: {other:?}"),
             }
         });
 
-        let got = pull_file(&mut client, &dst_dir, &hash, "track.flac", &mut |_, _| {}, &mut |_| {}).unwrap();
+        let got = pull_file(&mut client, &dst_dir, &hash, "track.flac", (1, 1), &mut |_, _| {}, &mut |_| {}).unwrap();
         sender.join().unwrap();
 
         assert_eq!(std::fs::read(&got.path).unwrap(), data);
@@ -607,10 +623,10 @@ mod tests {
                 Msg::BlobReq { offset, .. } => offset,
                 other => panic!("unexpected: {other:?}"),
             };
-            send_file(&mut server, &other, offset, &claimed).unwrap();
+            send_file(&mut server, &other, offset, &claimed, &mut |_, _| {}).unwrap();
         });
 
-        let err = pull_file(&mut client, &dst_dir, &wanted_hash, "good.flac", &mut |_, _| {}, &mut |_| {})
+        let err = pull_file(&mut client, &dst_dir, &wanted_hash, "good.flac", (1, 1), &mut |_, _| {}, &mut |_| {})
             .unwrap_err();
         sender.join().unwrap();
 
@@ -637,9 +653,9 @@ mod tests {
                 Msg::BlobReq { offset, .. } => offset,
                 other => panic!("unexpected: {other:?}"),
             };
-            send_file(&mut server, &src, offset, &"0".repeat(64)).unwrap();
+            send_file(&mut server, &src, offset, &"0".repeat(64), &mut |_, _| {}).unwrap();
         });
-        let err = pull_file(&mut client, &dst_dir, &hash, "x.flac", &mut |_, _| {}, &mut |_| {}).unwrap_err();
+        let err = pull_file(&mut client, &dst_dir, &hash, "x.flac", (1, 1), &mut |_, _| {}, &mut |_| {}).unwrap_err();
         sender.join().unwrap();
 
         assert!(err.to_string().contains("reports having sent"), "error: {err}");
@@ -672,11 +688,11 @@ mod tests {
                 Msg::BlobReq { offset, .. } => offset,
                 other => panic!("unexpected: {other:?}"),
             };
-            send_file(&mut server, &src, offset, &h).unwrap();
+            send_file(&mut server, &src, offset, &h, &mut |_, _| {}).unwrap();
             offset
         });
 
-        let got = pull_file(&mut client, &dst_dir, &hash, "long.flac", &mut |_, _| {}, &mut |_| {}).unwrap();
+        let got = pull_file(&mut client, &dst_dir, &hash, "long.flac", (1, 1), &mut |_, _| {}, &mut |_| {}).unwrap();
         let offset = asked.join().unwrap();
 
         assert_eq!(offset, half as u64, "had to request only what was missing");
@@ -710,11 +726,11 @@ mod tests {
                 Msg::BlobReq { offset, .. } => offset,
                 other => panic!("unexpected: {other:?}"),
             };
-            send_file(&mut server, &src, offset, &h).unwrap();
+            send_file(&mut server, &src, offset, &h, &mut |_, _| {}).unwrap();
         });
 
         let err =
-            pull_file(&mut client, &dst_dir, &hash, "x.flac", &mut |_, _| {}, &mut |_| {}).unwrap_err();
+            pull_file(&mut client, &dst_dir, &hash, "x.flac", (1, 1), &mut |_, _| {}, &mut |_| {}).unwrap_err();
         sender.join().unwrap();
         assert!(err.to_string().contains("hash"), "unexpected error: {err}");
         assert!(!part_path(&dst_dir, &hash).exists(), "the bad .part is discarded");
@@ -743,9 +759,9 @@ mod tests {
                 Msg::BlobReq { offset, .. } => offset,
                 other => panic!("unexpected: {other:?}"),
             };
-            send_file(&mut server, &src, offset, &h).unwrap();
+            send_file(&mut server, &src, offset, &h, &mut |_, _| {}).unwrap();
         });
-        let got = pull_file(&mut client, &dst_dir, &hash, "same.flac", &mut |_, _| {}, &mut |_| {}).unwrap();
+        let got = pull_file(&mut client, &dst_dir, &hash, "same.flac", (1, 1), &mut |_, _| {}, &mut |_| {}).unwrap();
         sender.join().unwrap();
 
         assert_ne!(got.path, existing);

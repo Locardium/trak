@@ -13,17 +13,28 @@ import {
   pause,
   seekTo as nativeSeekTo,
   getState,
+  getProgressCheckpoint,
   addStateListener,
   setVolume as nativeSetVolume,
   setCrossfade as nativeSetCrossfade,
   setSourceGain,
   listOutputDevices as nativeListOutputDevices,
   setOutputDevice as nativeSetOutputDevice,
+  isIgnoringBatteryOptimizations,
+  requestIgnoreBatteryOptimizations,
+  setQueue as nativeSetQueue,
+  setQueueMode as nativeSetQueueMode,
+  queueNext,
+  queuePrev,
+  restoreQueue,
+  stop as nativeStop,
+  type NativeAudioQueueItem,
   type NativeAudioOutputDevice,
   type NativeAudioState,
 } from './nativeAudioPlugin';
 
 export type { NativeAudioOutputDevice };
+export { isIgnoringBatteryOptimizations, requestIgnoreBatteryOptimizations };
 
 /// Where the file is and how loud to play it, worked out by the same Rust
 /// code the desktop player uses (`track_cue` -> `db::playback_gain_db`). The
@@ -31,7 +42,15 @@ export type { NativeAudioOutputDevice };
 /// measured loudness and the normalize preference, none of which this side
 /// has.
 interface TrackCue {
+  id: number;
+  /// Shown by the notification and the lock screen. Sent explicitly because
+  /// the system otherwise falls back to the file's own tags, and a file
+  /// without tags (a WAV, typically) showed nothing at all (bug 3.2).
+  title: string;
+  artist: string;
   path: string;
+  /// Cached cover thumb (a file path), `null` if not made yet or none.
+  artwork: string | null;
   gainDb: number;
   /// Where the audio really starts and ends. Zero for either edge means the
   /// track has not been measured yet and plays untrimmed.
@@ -40,6 +59,25 @@ interface TrackCue {
 }
 
 const trackCue = (id: number) => invoke<TrackCue>('track_cue', { id });
+
+/// Cues for a whole queue in one trip. Tracks that no longer exist are left
+/// out, so callers look entries up by `id` rather than by position.
+const queueCues = (ids: number[]) => invoke<TrackCue[]>('queue_cues', { ids });
+
+/// What the plugin needs to play one track, from its cue. One place, so the
+/// queue, the current track and the staged next one can't disagree.
+function toQueueItem(cue: TrackCue): NativeAudioQueueItem {
+  return {
+    id: cue.id,
+    src: cue.path,
+    title: cue.title || undefined,
+    artist: cue.artist || undefined,
+    artwork: cue.artwork ?? undefined,
+    gainDb: cue.gainDb,
+    leadMs: cue.leadMs,
+    audioEndMs: cue.audioEndMs,
+  };
+}
 
 let initialized: Promise<unknown> | null = null;
 /// Initializes the plugin once, and only *remembers* it once it worked.
@@ -58,12 +96,6 @@ function ensureInitialized() {
     });
   }
   return initialized;
-}
-
-// file:// + path as-is (app's internal storage, no spaces to break things
-// from missing encoding at this phase — see PRODUCT.md Phase 4).
-function toFileUri(path: string) {
-  return 'file://' + path.replace(/\\/g, '/');
 }
 
 /// What the plugin has staged behind the current track, and how long the
@@ -101,7 +133,123 @@ function expect(id: number) {
 /// trusted over what was just requested.
 let stagingInFlight = 0;
 
+/// What the app should show as loaded when it (re)mounts. See `restorePlayback`.
+export interface RestoredPlayback {
+  id: number;
+  posMs: number;
+  playing: boolean;
+  /// The player came back with a queue of its own (Fase 1.7). When it
+  /// didn't, the app hands it the one it kept.
+  hasQueue: boolean;
+}
+
+/// Set as soon as the user plays or stops something, so a restore that was
+/// still on its way can't load the old track over the one just picked.
+let restoreCancelled = false;
+
+/// Picks up where the player really is when the WebView starts from zero.
+///
+/// Two ways to get here, and both used to look like a fresh app:
+/// - The Activity (and its WebView) was rebuilt but the process lived on. The
+///   plugin is still playing — or holding a paused track — so its state is
+///   the answer. Only the React side forgot.
+/// - The process died (paused music leaves the service out of foreground, so
+///   Android is free to reclaim it). The plugin is empty, but it wrote a
+///   checkpoint on every pause: that track is loaded back, paused, at that
+///   position, and play resumes it.
+export async function restorePlayback(): Promise<RestoredPlayback | null> {
+  await ensureInitialized();
+  // The native queue first (Fase 1.7): in a fresh process it reads the
+  // queue back from disk and loads its current entry, paused where it
+  // stopped — after which the plugin's own state is the answer below. The
+  // checkpoint path further down only covers a first run without a saved
+  // queue.
+  await restoreQueue().catch(() => {});
+  const st = await getState();
+  if (st.trackId != null && st.trackId > 0) {
+    lastTrackId = st.trackId;
+    return {
+      id: st.trackId,
+      posMs: Math.round((st.currentTime || 0) * 1000),
+      playing: st.isPlaying,
+      hasQueue: (st.queueLength ?? 0) > 0,
+    };
+  }
+  const cp = await getProgressCheckpoint().catch(() => null);
+  if (!cp || cp.id <= 0 || restoreCancelled) return null;
+  // The track may be gone since (deleted, or synced away): then there's
+  // nothing to go back to.
+  const cue = await trackCue(cp.id).catch(() => null);
+  if (!cue || restoreCancelled) return null;
+  quiet();
+  expect(cp.id);
+  stagedNextId = null;
+  await setSource({ ...toQueueItem(cue), id: cp.id });
+  if (cp.currentTime > 0) await nativeSeekTo(cp.currentTime);
+  return { id: cp.id, posMs: Math.round(cp.currentTime * 1000), playing: false, hasQueue: false };
+}
+
+// --- Native queue (Fase 1.7) -------------------------------------------------
+//
+// On Android the player owns the queue. These hand it over and step it; the
+// app learns what is playing from the plugin's state events (`advanced`),
+// the same way it learns about a gapless hand-off.
+
+/// Hands the whole queue to the player and starts `startId`.
+export async function playQueue(
+  ids: number[],
+  startId: number,
+  repeat: string,
+  autoplay: boolean,
+) {
+  restoreCancelled = true;
+  await ensureInitialized();
+  const cues = await queueCues(ids);
+  const index = cues.findIndex((c) => c.id === startId);
+  if (index < 0) throw new Error('track not found');
+  quiet();
+  expect(startId);
+  stagedNextId = null;
+  await nativeSetQueue({ items: cues.map(toQueueItem), index, play: true, repeat, autoplay });
+}
+
+/// Replaces the queue around what is playing, without touching it: shuffle
+/// toggled, or levels/trims that changed with a preference.
+export async function updateQueue(
+  ids: number[],
+  currentId: number | null,
+  repeat: string,
+  autoplay: boolean,
+) {
+  await ensureInitialized();
+  const cues = await queueCues(ids);
+  const index = currentId == null ? -1 : cues.findIndex((c) => c.id === currentId);
+  await nativeSetQueue({ items: cues.map(toQueueItem), index, play: false, repeat, autoplay });
+}
+
+export async function setQueueMode(repeat: string, autoplay: boolean) {
+  await ensureInitialized();
+  await nativeSetQueueMode(repeat, autoplay);
+}
+
+export async function nextTrack() {
+  restoreCancelled = true;
+  await ensureInitialized();
+  quiet();
+  await queueNext();
+}
+
+/// Previous entry, or the start of this one once it has played a while —
+/// decided by the player, which knows the position without a round trip.
+export async function prevTrack() {
+  restoreCancelled = true;
+  await ensureInitialized();
+  quiet();
+  await queuePrev();
+}
+
 export async function playTrack(id: number) {
+  restoreCancelled = true;
   await ensureInitialized();
   // Already staged and there's an overlap configured: this is the transition
   // the plugin was set up for, so let it fade instead of cutting.
@@ -118,13 +266,7 @@ export async function playTrack(id: number) {
   quiet();
   expect(id);
   stagedNextId = null;
-  await setSource({
-    src: toFileUri(cue.path),
-    id,
-    gainDb: cue.gainDb,
-    leadMs: cue.leadMs,
-    audioEndMs: cue.audioEndMs,
-  });
+  await setSource({ ...toQueueItem(cue), id });
   await play();
 }
 
@@ -152,13 +294,7 @@ export async function setNextTrack(id: number | null) {
   stagedNextId = id;
   stagingInFlight++;
   try {
-    await setNextSource({
-      src: toFileUri(cue.path),
-      id,
-      gainDb: cue.gainDb,
-      leadMs: cue.leadMs,
-      audioEndMs: cue.audioEndMs,
-    });
+    await setNextSource({ ...toQueueItem(cue), id });
   } finally {
     stagingInFlight--;
   }
@@ -185,18 +321,14 @@ export async function resumePlayback() {
 }
 
 export async function stopPlayback() {
+  restoreCancelled = true;
   quiet();
   lastTrackId = null;
   awaitedId = null;
   stagedNextId = null;
-  stagingInFlight++;
-  try {
-    await setNextSource(null);
-  } finally {
-    stagingInFlight--;
-  }
-  await pause();
-  await nativeSeekTo(0);
+  // The player clears everything itself — queue, staged next, checkpoint and
+  // notification — the same as when stop comes from the notification (3.3).
+  await nativeStop();
 }
 
 export async function seekTo(secs: number) {
@@ -281,7 +413,11 @@ export type PlaybackEvent =
   /// A staged track took over on its own (gapless or crossfaded). There is no
   /// `ended` before it: the player never stopped.
   | { type: 'advanced'; id: number }
-  | { type: 'ended' };
+  | { type: 'ended' }
+  /// Stopped from outside the app (the notification's stop button).
+  | { type: 'stopped' }
+  /// The player's repeat mode changed on its own ("once" consumed).
+  | { type: 'repeat'; value: 'off' | 'track' | 'once' };
 
 let endedSent = false;
 
@@ -337,6 +473,7 @@ const POSITION_MS = 200;
 let lastPositionEmit = 0;
 
 let lastReportedPlaying: boolean | null = null;
+let lastReportedRepeat: string | null = null;
 
 function handleState(st: NativeAudioState, emit: (e: PlaybackEvent) => void) {
   const now = Date.now();
@@ -357,6 +494,14 @@ function handleState(st: NativeAudioState, emit: (e: PlaybackEvent) => void) {
       awaitedId = null;
       lastTrackId = id;
     }
+  } else if (id == null && lastTrackId != null) {
+    // The player has nothing loaded any more and the app didn't ask for it
+    // (its own stop clears `lastTrackId` first): stopped from the
+    // notification.
+    lastTrackId = null;
+    quiet();
+    emit({ type: 'stopped' });
+    return;
   } else if (id != null && id !== lastTrackId) {
     // A queued track took over. Nothing ended and nothing was asked for, so
     // this is the only place the change shows up.
@@ -375,6 +520,15 @@ function handleState(st: NativeAudioState, emit: (e: PlaybackEvent) => void) {
   // this is by definition the answer to the previous question.
   if (stagingInFlight === 0) stagedNextId = st.nextTrackId ?? null;
   if (typeof st.crossfade === 'number') crossfadeSecs = st.crossfade;
+
+  if (st.repeatMode && st.repeatMode !== lastReportedRepeat) {
+    const first = lastReportedRepeat == null;
+    lastReportedRepeat = st.repeatMode;
+    // The first state only says what the app itself set; reporting it back
+    // would be an echo.
+    if (!first) emit({ type: 'repeat', value: st.repeatMode });
+  }
+  const nativeQueue = (st.queueLength ?? 0) > 0;
 
   // Play/pause can also be toggled from the notification and the lockscreen,
   // not just from the app: without this, the app's button keeps showing a
@@ -398,6 +552,10 @@ function handleState(st: NativeAudioState, emit: (e: PlaybackEvent) => void) {
     !appVisible &&
     !endedEarly &&
     stagedNextId == null &&
+    // With a native queue nothing restarts after the end on its own (the
+    // player stages what follows before it gets there), so there is no
+    // foreground-service restart to dodge and no reason to cut the tail.
+    !nativeQueue &&
     st.isPlaying &&
     durationMs > 0 &&
     durationMs - ms <= NEAR_END_LEAD_MS

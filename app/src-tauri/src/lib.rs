@@ -4,6 +4,7 @@ mod discovery;
 mod export_xml;
 mod pairing;
 mod power;
+mod sync_notice;
 mod watch;
 mod xml_sync;
 
@@ -167,7 +168,7 @@ pub struct AppState {
     /// the lock.
     db_read: Mutex<Connection>,
     player: Player,
-    covers: Mutex<HashMap<i64, Option<String>>>,
+    covers: cover::Covers,
     /// Managed folder (<Music>/Sway): everything imported is copied here.
     music_dir: PathBuf,
     /// Sway devices seen on the local network (Phase 5.1).
@@ -192,6 +193,8 @@ pub struct AppState {
     expected_paths: Mutex<HashMap<PathBuf, i64>>,
     /// Auto-sync state (changes pending propagation).
     autosync: autosync::AutoSync,
+    /// Syncs in flight, for the progress event and Android's notification.
+    sync_notice: sync_notice::SyncNotice,
     /// Network and battery (Phase 6.7). On desktop these are read here; on
     /// Android the screen reports them, since it's the only thing that can.
     conditions: Mutex<power::Conditions>,
@@ -223,20 +226,6 @@ impl AppState {
             None => false,
         }
     }
-}
-
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SyncProgressEvent {
-    uid: String,
-    /// Index of the current file and total files for this run.
-    file_index: usize,
-    file_total: usize,
-    filename: String,
-    /// Bytes of the current file.
-    done: u64,
-    total: u64,
-    sending: bool,
 }
 
 /// The sync engine running inside the app: the base is `AppState`'s, and
@@ -279,18 +268,7 @@ impl engine::Host for AppHost<'_> {
     }
 
     fn progress(&self, p: &engine::Progress) {
-        let _ = self.0.emit(
-            "sync-progress",
-            SyncProgressEvent {
-                uid: p.peer_uid.to_string(),
-                file_index: p.index,
-                file_total: p.total_files,
-                filename: p.filename.to_string(),
-                done: p.done,
-                total: p.total,
-                sending: p.sending,
-            },
-        );
+        sync_notice::progress(self.0, p);
     }
 
     fn library_changed(&self, force: bool) {
@@ -308,12 +286,14 @@ fn import_folder(app: AppHandle, state: State<AppState>, folder: String) -> Resu
         .map_err(|e| e.to_string())?
     };
     autosync::note_change(&app);
-    kick_loudness(&app);
+    kick_background(&app);
     Ok(n)
 }
 
-/// Wakes the analyzer after tracks arrive, so a track is measured once when
-/// it enters the library rather than the first time something needs it.
+/// Wakes the background work after tracks arrive: the loudness analyzer and
+/// the cover thumbs (`cover::Covers::warm`), so each track is measured and
+/// gets its cover once, when it enters the library, rather than the first
+/// time something needs it.
 ///
 /// Measuring is not gated on normalization being on. A track gets analyzed
 /// when it shows up, so that turning normalization on is instant instead of
@@ -324,8 +304,10 @@ fn import_folder(app: AppHandle, state: State<AppState>, folder: String) -> Resu
 /// Cheap to call from anywhere: the analyzer ignores it when a sweep is
 /// already running — that sweep re-reads what's pending on every batch and
 /// will reach the new rows on its own.
-pub fn kick_loudness(app: &AppHandle) {
-    app.state::<AppState>().loudness.sweep(app.clone());
+pub fn kick_background(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    state.loudness.sweep(app.clone());
+    state.covers.warm(app.clone());
 }
 
 /// Reports when something running with the DB lock held took long enough
@@ -383,7 +365,7 @@ fn import_files(
         .map_err(|e| e.to_string())?
     };
     autosync::note_change(&app);
-    kick_loudness(&app);
+    kick_background(&app);
     Ok(ids)
 }
 
@@ -436,16 +418,17 @@ fn set_volume(state: State<AppState>, volume: f32) {
 
 #[tauri::command]
 fn cover_thumb(state: State<AppState>, id: i64) -> Result<Option<String>, String> {
-    if let Some(c) = state.covers.lock().unwrap().get(&id) {
-        return Ok(c.clone());
-    }
-    let path = {
-        let conn = state.db.lock().unwrap();
-        db::track_path(&conn, id).map_err(|e| e.to_string())?
+    let (path, hash): (String, Option<String>) = {
+        let conn = state.db_read.lock().unwrap();
+        conn.query_row(
+            "SELECT path, content_hash FROM tracks WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?
     };
-    let thumb = cover::thumb_data_url(std::path::Path::new(&path));
-    state.covers.lock().unwrap().insert(id, thumb.clone());
-    Ok(thumb)
+    // Outside the lock: it may decode the file.
+    Ok(state.covers.get(id, std::path::Path::new(&path), hash.as_deref()))
 }
 
 /// Resolves id -> file path. On desktop `play_track` already does this
@@ -462,6 +445,14 @@ fn get_track_path(state: State<AppState>, id: i64) -> Result<String, String> {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TrackCue {
+    /// Which track this is. `track_cue` callers already know it; `queue_cues`
+    /// callers need it, since tracks that no longer exist are left out.
+    id: i64,
+    /// For the notification and the lock screen. Without them the system
+    /// falls back to whatever the file's own tags say, and a WAV without tags
+    /// shows nothing (bug 3.2).
+    title: String,
+    artist: String,
     path: String,
     /// Trim and normalization folded into one figure, in dB. Desktop turns
     /// this into a linear multiplier inside `cue_for`; the plugin wants the
@@ -477,6 +468,26 @@ struct TrackCue {
     /// having its edges guessed.
     lead_ms: i64,
     audio_end_ms: i64,
+    /// Cached cover thumb (a file path) for the notification and the lock
+    /// screen (3.2). Filled in after the DB lock is released: finding it is
+    /// file I/O.
+    artwork: Option<String>,
+    #[serde(skip)]
+    hash: Option<String>,
+}
+
+impl TrackCue {
+    /// `make`: generate the thumb if it isn't cached yet. For the one track
+    /// about to play, not for a whole queue — the background pass covers the
+    /// rest.
+    fn with_artwork(mut self, covers: &cover::Covers, make: bool) -> Self {
+        self.artwork = self
+            .hash
+            .as_deref()
+            .and_then(|h| covers.file(h, std::path::Path::new(&self.path), make))
+            .map(|p| p.to_string_lossy().into_owned());
+        self
+    }
 }
 
 /// Path and level for a track, for the platforms whose player lives outside
@@ -488,19 +499,60 @@ struct TrackCue {
 /// so a track plays at one level on both platforms.
 #[tauri::command]
 fn track_cue(state: State<AppState>, id: i64) -> Result<TrackCue, String> {
-    let conn = state.db.lock().unwrap();
-    let path = db::track_path(&conn, id).map_err(|e| e.to_string())?;
-    let a = db::track_playback(&conn, id).unwrap_or_default();
-    let prefs = db::get_playback_prefs(&conn).unwrap_or_default();
+    // Read-only: the read connection, not the write lock it used to take —
+    // a sync or an import holding that lock made starting a track wait.
+    let cue = {
+        let conn = state.db_read.lock().unwrap();
+        let prefs = db::get_playback_prefs(&conn).unwrap_or_default();
+        cue_for_track(&conn, &prefs, id).map_err(|e| e.to_string())?
+    };
+    Ok(cue.with_artwork(&state.covers, true))
+}
+
+/// Cues for a whole play queue in one pass (Fase 1.7). The Android player
+/// keeps the queue itself, with everything it needs to play each entry, so
+/// that it can go on without JS — and without Rust, which isn't running when
+/// Android restarts only the audio service after killing the app.
+///
+/// Tracks that no longer exist are left out rather than failing the lot; each
+/// cue carries its `id` so the caller can tell which ones.
+#[tauri::command]
+fn queue_cues(state: State<AppState>, ids: Vec<i64>) -> Result<Vec<TrackCue>, String> {
+    let cues: Vec<TrackCue> = {
+        let conn = state.db_read.lock().unwrap();
+        let prefs = db::get_playback_prefs(&conn).unwrap_or_default();
+        ids.into_iter()
+            .filter_map(|id| cue_for_track(&conn, &prefs, id).ok())
+            .collect()
+    };
+    Ok(cues.into_iter().map(|c| c.with_artwork(&state.covers, false)).collect())
+}
+
+fn cue_for_track(
+    conn: &Connection,
+    prefs: &db::PlaybackPrefs,
+    id: i64,
+) -> rusqlite::Result<TrackCue> {
+    let (path, title, artist, hash): (String, String, String, Option<String>) = conn.query_row(
+        "SELECT path, title, artist, content_hash FROM tracks WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    let a = db::track_playback(conn, id).unwrap_or_default();
     // Crossfade overlaps the tracks, so there is no gap for trimming to close
     // and cutting the tails would only shorten the overlap. Same rule the
     // desktop player follows.
     let trim = prefs.gapless && prefs.crossfade_secs <= 0.0;
     Ok(TrackCue {
+        id,
+        title,
+        artist,
         path,
-        gain_db: db::playback_gain_db(a.gain_db, a.loudness_lufs, prefs.normalize),
+        gain_db: db::playback_gain_db(a.gain_db, a.loudness_lufs, a.peak_db, prefs.normalize),
         lead_ms: if trim { a.lead_silence_ms.unwrap_or(0).max(0) } else { 0 },
         audio_end_ms: if trim { a.audio_end_ms.unwrap_or(0).max(0) } else { 0 },
+        artwork: None,
+        hash,
     })
 }
 
@@ -707,7 +759,7 @@ fn cue_for(conn: &Connection, id: i64, prefs: &db::PlaybackPrefs) -> Result<Cue,
     Ok(Cue {
         id,
         path: std::path::PathBuf::from(path),
-        gain: db::db_to_linear(db::playback_gain_db(a.gain_db, a.loudness_lufs, prefs.normalize)),
+        gain: db::db_to_linear(db::playback_gain_db(a.gain_db, a.loudness_lufs, a.peak_db, prefs.normalize)),
         duration_ms: duration_ms.max(0) as u64,
         // Unanalyzed tracks trim nothing: playing them untrimmed is the old
         // behaviour, and guessing where the audio starts without measuring is
@@ -818,7 +870,7 @@ fn set_playback_prefs(
     // Turning normalization on with a partly-measured library: make sure the
     // sweep is awake so the gap closes instead of sitting there.
     if prefs.normalize {
-        kick_loudness(&app);
+        kick_background(&app);
     }
     Ok(())
 }
@@ -864,7 +916,7 @@ fn rescan_analysis(app: AppHandle, state: State<AppState>) -> Result<i64, String
         let conn = state.db.lock().unwrap();
         db::clear_analysis(&conn).map_err(|e| e.to_string())?;
     }
-    kick_loudness(&app);
+    kick_background(&app);
     let conn = state.db_read.lock().unwrap();
     db::analysis_pending_count(&conn).map_err(|e| e.to_string())
 }
@@ -1082,6 +1134,41 @@ fn set_scope_mode(
     Ok(())
 }
 
+/// This device was linked for the first time and hasn't said yet whether it
+/// wants the whole library or chosen playlists (Fase 1.8). Until it does, its
+/// scope is "selected" with nothing marked: playlists travel, files don't.
+#[tauri::command]
+fn scope_prompt_pending(state: State<AppState>) -> Result<bool, String> {
+    let conn = state.db_read.lock().unwrap();
+    Ok(db::get_setting(&conn, pairing::SCOPE_PROMPT_KEY)
+        .map_err(|e| e.to_string())?
+        .as_deref()
+        == Some("1"))
+}
+
+/// The answer to that question. `everything` switches the scope to the whole
+/// library; otherwise it stays "selected" and the screen shows the playlists.
+#[tauri::command]
+fn resolve_scope_prompt(
+    app: AppHandle,
+    state: State<AppState>,
+    everything: bool,
+) -> Result<(), String> {
+    let me = {
+        let conn = state.db.lock().unwrap();
+        let me = db::this_device_uid(&conn).map_err(|e| e.to_string())?;
+        if everything {
+            scope::set_mode(&conn, &me, scope::Mode::All).map_err(|e| e.to_string())?;
+        }
+        db::set_setting(&conn, pairing::SCOPE_PROMPT_KEY, "0").map_err(|e| e.to_string())?;
+        me
+    };
+    if everything {
+        after_scope_change(&app, &me);
+    }
+    Ok(())
+}
+
 /// A scope change has two immediate effects: it has to be propagated (it's
 /// replicated data) and, if the change is to THIS device's scope, whatever
 /// just came back into scope has to be rescued from the trash — before the
@@ -1151,7 +1238,7 @@ fn after_scope_change(app: &AppHandle, device_uid: &str) {
             // own. Without this event the change wouldn't show up until
             // restart.
             let _ = app.emit("library-changed", ());
-            kick_loudness(&app);
+            kick_background(&app);
         });
     }
 
@@ -1365,8 +1452,8 @@ fn ui_key(key: &str) -> String {
     format!("ui.{key}")
 }
 
-/// Empties `%LOCALAPPDATA%\com.sway.app`, once, the first time a build that
-/// keeps the webview profile in the music folder runs.
+/// Empties `%LOCALAPPDATA%\com.locardium.sway`, once, the first time a build
+/// that keeps the webview profile in the music folder runs.
 ///
 /// Only `Local Storage` is carried across, and for one reason: it holds the
 /// settings the frontend is about to migrate into the db (column layout,
@@ -1607,6 +1694,17 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
                 // being downloaded. Auto-importing it would resurrect
                 // every deletion.
                 .filter(|e| !import::is_internal_path(&e.path))
+                // Never a directory. inotify under notify 8 also reports
+                // OPEN / CLOSE_NOWRITE, and anything that lists the managed
+                // folder produces an event for the folder itself. That used
+                // to reach `import_paths`, which expands a directory into
+                // every audio file under it: the whole library re-read and
+                // re-hashed with the DB write lock held (~16 s per pass,
+                // measured on a S24) — and the walk opened the folder again,
+                // so it never stopped. A folder moved in whole is the one
+                // case given up here; its files import on the next event
+                // that touches them.
+                .filter(|e| !e.path.is_dir())
                 .map(|e| e.path.to_string_lossy().into_owned())
                 .collect();
             if paths.is_empty() {
@@ -1654,7 +1752,7 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
                 eprintln!("[watch] imported new files ({} paths), notifying UI", paths.len());
                 autosync::note_change(&handle);
                 let _ = handle.emit("library-changed", ());
-                kick_loudness(&handle);
+                kick_background(&handle);
             }
         }
     });
@@ -1672,13 +1770,19 @@ pub fn run() {
     // itself is doing. That noise has already cost this project real
     // debugging time. `RUST_LOG=symphonia=info` brings them back when the
     // question actually is about decoding.
+    //
+    // Same filter on Android. It used to have none, only a max level of
+    // Debug, so logcat got every ID3 frame symphonia skips (GEOB, RVAD...)
+    // and every tag lofty parses, for every track the analyzer measures.
+    const LOG_FILTER: &str = "info,symphonia=error,symphonia_core=error,symphonia_bundle_mp3=error,\
+         symphonia_metadata=error,symphonia_format_riff=error,symphonia_codec_pcm=error,\
+         lofty=error";
+
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
-            "info,symphonia=error,symphonia_core=error,symphonia_bundle_mp3=error,\
-             symphonia_metadata=error,symphonia_format_riff=error,symphonia_codec_pcm=error,\
-             lofty=error",
-        ))
+        let _ = env_logger::Builder::from_env(
+            env_logger::Env::default().default_filter_or(LOG_FILTER),
+        )
         .try_init();
     }
 
@@ -1686,6 +1790,7 @@ pub fn run() {
     android_logger::init_once(
         android_logger::Config::default()
             .with_max_level(log::LevelFilter::Debug)
+            .with_filter(android_logger::FilterBuilder::new().parse(LOG_FILTER).build())
             .with_tag("sway"),
     );
 
@@ -1753,6 +1858,15 @@ pub fn run() {
                 dir.join("library")
             };
             std::fs::create_dir_all(&music_dir).ok();
+            // Cover thumbs are a cache: on desktop next to the db (not
+            // inside `library`, which is the user's music); on Android in the
+            // app's private cache, since there the data dir IS the music
+            // folder the watcher looks at.
+            let covers_dir = if cfg!(target_os = "android") {
+                app.path().app_cache_dir().unwrap_or_else(|_| dir.clone()).join("covers")
+            } else {
+                dir.join("covers")
+            };
             if let Err(e) = flatten_legacy_subdir(&conn, &music_dir) {
                 eprintln!("[lib] managed folder migration failed: {e}");
             }
@@ -1781,13 +1895,14 @@ pub fn run() {
                 db: TrackedDb::new(conn),
                 db_read: Mutex::new(db::open_read(&db_file).expect("db open (read)")),
                 player: Player::new(),
-                covers: Mutex::new(HashMap::new()),
+                covers: cover::Covers::new(covers_dir),
                 music_dir: music_dir.clone(),
                 peers: discovery::Peers::default(),
                 mdns: Mutex::new(None),
                 pairing: pairing::Pairing::default(),
                 expected_paths: Mutex::new(HashMap::new()),
                 autosync: autosync::AutoSync::default(),
+                sync_notice: sync_notice::SyncNotice::default(),
                 conditions: Mutex::new(power::Conditions::default()),
                 watchers: watch::Watchers::default(),
                 loudness: loudness::Analyzer::default(),
@@ -1853,7 +1968,7 @@ pub fn run() {
             }
             // Picks up anything that entered the library while this device
             // was closed (imports on another machine, files brought by sync).
-            kick_loudness(app.handle());
+            kick_background(app.handle());
 
             // The window is built here, not declared in tauri.conf.json,
             // for one reason: the config route forces the webview's data
@@ -1864,7 +1979,7 @@ pub fn run() {
             // its own (`manager/webview.rs`: "we do respect
             // user-specification"). Without this, WebView2 keeps its whole
             // profile — cache, cookies, local storage — under
-            // `%LOCALAPPDATA%\com.sway.app`, and nothing Sway owns belongs
+            // `%LOCALAPPDATA%\com.locardium.sway`, and nothing Sway owns belongs
             // outside the music folder.
             //
             // Last thing in setup, after `manage`: the webview starts
@@ -1901,6 +2016,9 @@ pub fn run() {
             reveal_track,
             get_track_path,
             track_cue,
+            queue_cues,
+            scope_prompt_pending,
+            resolve_scope_prompt,
             list_playlists,
             create_playlist,
             rename_playlist,

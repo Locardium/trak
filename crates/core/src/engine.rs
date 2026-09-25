@@ -220,11 +220,30 @@ pub fn serve_requests<H: Host>(
                 send_manifest(sess, manifest, gzip)?;
             }
             // Someone is requesting one of our files.
-            Msg::BlobReq { hash, offset } => {
+            Msg::BlobReq { hash, offset, index, of } => {
                 let path = host.with_db(|conn| Ok(crate::transfer::path_for_hash(conn, &hash)))?;
                 match path {
                     Some(p) => {
-                        crate::transfer::send_file(sess, &p, offset, &hash)?;
+                        // The other side drives this run; all we can say is
+                        // which file is going out (1.3: the phone's
+                        // notification and toast had nothing otherwise).
+                        let filename = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let mut progress = |done: u64, total: u64| {
+                            host.progress(&Progress {
+                                peer_uid,
+                                index,
+                                total_files: of,
+                                filename: &filename,
+                                done,
+                                total,
+                                sending: true,
+                            });
+                        };
+                        progress(offset, 0);
+                        crate::transfer::send_file(sess, &p, offset, &hash, &mut progress)?;
                         stats.sent += 1;
                     }
                     None => sess.send(&Msg::BlobError {
@@ -244,17 +263,30 @@ pub fn serve_requests<H: Host>(
                 duration_ms,
                 bpm,
                 updated_at,
+                index,
+                of,
                 ..
             } => {
                 let music_dir = host.music_dir();
                 // Push: the other side sends from scratch, not resuming anything of ours.
+                let mut progress = |done: u64, total: u64| {
+                    host.progress(&Progress {
+                        peer_uid,
+                        index,
+                        total_files: of,
+                        filename: &filename,
+                        done,
+                        total,
+                        sending: false,
+                    });
+                };
                 let got = crate::transfer::receive_file(
                     sess,
                     &music_dir,
                     &hash,
                     &filename,
                     false,
-                    &mut |_, _| {},
+                    &mut progress,
                     &mut |dest| host.expect_path(dest),
                 )?;
                 host.with_db(|conn| {
@@ -506,10 +538,35 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
     let mut index = 0usize;
 
     // --- Pull what's missing here -----------------------------------------
+    //
+    // The scope is read again between files, not only when planning: on a
+    // first sync the user picks playlists while the files are already coming
+    // in, and a plan made at the start would have downloaded the whole
+    // library anyway (to be deleted by hand afterwards). Re-reading the scope
+    // rows is two small queries; the set is only rebuilt when they changed.
+    let here = host.with_db(|conn| Ok(crate::db::this_device_uid(conn)?))?;
+    let mut scope_rows = host.with_db(|conn| {
+        Ok((crate::scope::entries(conn)?, crate::scope::all_device_sync(conn)?))
+    })?;
+    let mut wanted = crate::manifest::wanted_now(&here, &scope_rows.0, &scope_rows.1, &remote);
+    let mut skipped_out_of_scope = 0usize;
     for f in &plan.pull_files {
         index += 1;
         let entry = remote.tracks.iter().find(|t| t.uid == f.track_uid);
         let Some(entry) = entry else { continue };
+        let rows = host.with_db(|conn| {
+            Ok((crate::scope::entries(conn)?, crate::scope::all_device_sync(conn)?))
+        })?;
+        if rows != scope_rows {
+            wanted = crate::manifest::wanted_now(&here, &rows.0, &rows.1, &remote);
+            scope_rows = rows;
+        }
+        if let Some(set) = &wanted {
+            if !set.contains(&entry.uid) {
+                skipped_out_of_scope += 1;
+                continue;
+            }
+        }
         let at = index;
         let mut progress = |done: u64, total: u64| {
             host.progress(&Progress {
@@ -527,6 +584,7 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
             &music_dir,
             &f.hash,
             &f.filename,
+            (at, total_files),
             &mut progress,
             &mut |dest| host.expect_path(dest),
         );
@@ -566,6 +624,12 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
         }
     }
 
+    if skipped_out_of_scope > 0 {
+        log::info!(
+            "[sync] {skipped_out_of_scope} file(s) left out: the scope changed during the sync"
+        );
+    }
+
     // --- Push what's missing there ------------------------------------
     for f in &plan.push_files {
         index += 1;
@@ -595,9 +659,23 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
             duration_ms: entry.duration_ms,
             bpm: entry.bpm,
             updated_at: entry.updated_at,
+            index,
+            of: total_files,
         });
         // A file that can't be read doesn't cut the whole run short.
-        match push.and_then(|_| crate::transfer::send_file(sess, &path, 0, &f.hash)) {
+        let at = index;
+        let mut progress = |done: u64, total: u64| {
+            host.progress(&Progress {
+                peer_uid,
+                index: at,
+                total_files,
+                filename: &f.filename,
+                done,
+                total,
+                sending: true,
+            });
+        };
+        match push.and_then(|_| crate::transfer::send_file(sess, &path, 0, &f.hash, &mut progress)) {
             Ok(()) => {
                 bytes += f.size as u64;
                 sent += 1;
@@ -1305,10 +1383,12 @@ mod tests {
                 "{who}: the newer rename wins and the other side's new playlist isn't lost"
             );
             let mut order = d.order_in("Friday");
+            // Sorted: what's checked is that both adds survived, not the
+            // order the merge happens to leave them in.
             order.sort();
             assert_eq!(
                 order,
-                vec!["Two".to_string(), "One".to_string()],
+                vec!["One".to_string(), "Two".to_string()],
                 "{who}: memberships are merged"
             );
             assert_eq!(d.order_in("Warmup"), vec!["Two".to_string()], "{who}: and so is the new playlist's");

@@ -349,9 +349,24 @@ pub fn apply(
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        // If the track hasn't reached this device yet, the membership is
-        // ignored: the next sync brings it, once the track exists.
-        let Some((pid, tid)) = ids else { continue };
+        // If the track hasn't reached this device yet, there's no row to
+        // link: the next sync brings the membership again, once the track
+        // exists. Meanwhile it's parked, only so the playlist's count is
+        // the real one (see `parked_memberships`).
+        let Some((pid, tid)) = ids else {
+            conn.execute(
+                "INSERT INTO parked_memberships (playlist_uid, track_uid, added_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(playlist_uid, track_uid) DO UPDATE SET added_at = excluded.added_at
+                 WHERE excluded.added_at > parked_memberships.added_at",
+                rusqlite::params![m.playlist_uid, m.track_uid, m.added_at],
+            )?;
+            continue;
+        };
+        conn.execute(
+            "DELETE FROM parked_memberships WHERE playlist_uid = ?1 AND track_uid = ?2",
+            rusqlite::params![m.playlist_uid, m.track_uid],
+        )?;
         // `DO UPDATE` and not `OR IGNORE`: a pair that already exists can
         // arrive with a different rank, which is how a reorder travels.
         let n = conn.execute(
@@ -409,6 +424,8 @@ fn apply_tombstone(
 ) -> rusqlite::Result<usize> {
     match t.entity.as_str() {
         "track" => {
+            // A track that never got here can still be parked in playlists.
+            conn.execute("DELETE FROM parked_memberships WHERE track_uid = ?1", [&t.uid])?;
             let row: Option<(i64, String)> = conn
                 .query_row(
                     "SELECT id, path FROM tracks WHERE uid = ?1",
@@ -437,11 +454,17 @@ fn apply_tombstone(
             Ok(1)
         }
         "playlist" => {
+            conn.execute("DELETE FROM parked_memberships WHERE playlist_uid = ?1", [&t.uid])?;
             let n = conn.execute("DELETE FROM playlists WHERE uid = ?1", [&t.uid])?;
             Ok(n)
         }
         "playlist_track" => {
             let Some((pl, tr)) = t.uid.split_once(':') else { return Ok(0) };
+            conn.execute(
+                "DELETE FROM parked_memberships
+                 WHERE playlist_uid = ?1 AND track_uid = ?2 AND added_at <= ?3",
+                rusqlite::params![pl, tr, t.deleted_at],
+            )?;
             // Only if the delete is later than the local add. If it was
             // added again after that, that add is the last word.
             let n = conn.execute(
@@ -654,6 +677,56 @@ mod tests {
         let applied = apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap();
         assert_eq!(applied.playlists, 1);
         assert_eq!(applied.memberships, 0);
+    }
+
+    fn count_of(conn: &Connection, uid: &str) -> i64 {
+        db::list_playlists(conn)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.uid.as_deref() == Some(uid))
+            .unwrap()
+            .track_count
+    }
+
+    /// A device that syncs only some playlists still shows how many tracks
+    /// the others have (1.8): the memberships it can't link are parked and
+    /// counted, a removal clears them, and resending doesn't double them.
+    #[test]
+    fn parked_memberships_give_the_real_count_until_removed() {
+        let conn = mem();
+        let member = |track: &str| Membership {
+            playlist_uid: "p1".into(),
+            track_uid: track.into(),
+            rank: "V".into(),
+            added_at: 5,
+        };
+        let changes = Changes {
+            playlists: vec![pl("p1", "Sets", None, 10)],
+            memberships: vec![member("a"), member("b")],
+            ..Default::default()
+        };
+        let dir = std::path::Path::new("/nowhere");
+        apply(&conn, &changes, dir).unwrap();
+        assert_eq!(count_of(&conn, "p1"), 2);
+        // Every sync resends them: still two.
+        apply(&conn, &changes, dir).unwrap();
+        assert_eq!(count_of(&conn, "p1"), 2);
+
+        // Removed from the playlist on the other side.
+        let removal = Changes {
+            tombstones: vec![tomb("playlist_track", "p1:a")],
+            ..Default::default()
+        };
+        apply(&conn, &removal, dir).unwrap();
+        assert_eq!(count_of(&conn, "p1"), 1);
+
+        // Deleted everywhere.
+        let gone = Changes {
+            tombstones: vec![tomb("track", "b")],
+            ..Default::default()
+        };
+        apply(&conn, &gone, dir).unwrap();
+        assert_eq!(count_of(&conn, "p1"), 0);
     }
 
     /// Metadata for a track whose file isn't there doesn't create a ghost

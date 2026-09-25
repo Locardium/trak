@@ -20,6 +20,11 @@ private const val NOTIFICATION_ICON_NAME = "ic_notification"
 class NativeAudioService : MediaSessionService() {
     private var notificationManager: PlayerNotificationManager? = null
     private var appLargeIcon: Bitmap? = null
+    /// The current track's cover and the path it came from: the notification
+    /// asks for the large icon on every update (once a second while playing),
+    /// so the 256 px thumb is decoded once per track, not per update.
+    private var artworkPath: String? = null
+    private var artworkBitmap: Bitmap? = null
 
     /// A crossfade swaps which ExoPlayer is the active one, and the session
     /// player is rebuilt around it. The notification holds its own reference,
@@ -79,6 +84,17 @@ class NativeAudioService : MediaSessionService() {
                         player: androidx.media3.common.Player,
                         callback: PlayerNotificationManager.BitmapCallback,
                     ): Bitmap? {
+                        // The cached cover thumb the app passed as the item's
+                        // artwork (a file path, see `buildMediaItem`); the app
+                        // icon only when the track has none.
+                        val path = player.mediaMetadata.artworkUri?.path
+                        if (path != null) {
+                            if (path != artworkPath) {
+                                artworkPath = path
+                                artworkBitmap = runCatching { BitmapFactory.decodeFile(path) }.getOrNull()
+                            }
+                            artworkBitmap?.let { return it }
+                        }
                         if (appLargeIcon == null) {
                             val iconResId = resolveAppIconResId()
                             if (iconResId != 0) appLargeIcon = BitmapFactory.decodeResource(resources, iconResId)
@@ -115,7 +131,7 @@ class NativeAudioService : MediaSessionService() {
                 setUseNextActionInCompactView(false)
                 setUseRewindActionInCompactView(true)
                 setUseFastForwardActionInCompactView(true)
-                setUseStopAction(false)
+                setUseStopAction(true)
                 setSmallIcon(resolveNotificationSmallIconResId())
                 setPlayer(player)
             }

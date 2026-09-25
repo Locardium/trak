@@ -7,8 +7,10 @@ import {
   exportLibraryXmlNow,
   getAutoSyncXml,
   importFromUri,
+  isIgnoringBatteryOptimizations,
   listOutputDevices,
   loudnessPending,
+  requestIgnoreBatteryOptimizations,
   rescanAnalysis,
   setAutoSyncXml,
   type PlaybackPrefs,
@@ -82,6 +84,19 @@ export default function Settings({
 
   const android = isAndroid();
   const showExport = !android;
+
+  // Fase 1.3: whether Android is free to freeze/kill Sway in the background.
+  // `null` = not checked yet (or desktop, where the whole row is hidden).
+  // Re-checked on window focus: the exemption dialog is a separate system
+  // Activity, and this is what's back on screen once the user answers it.
+  const [batteryExempt, setBatteryExempt] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!isIgnoringBatteryOptimizations) return;
+    const check = () => isIgnoringBatteryOptimizations!().then(setBatteryExempt).catch(() => {});
+    check();
+    window.addEventListener('focus', check);
+    return () => window.removeEventListener('focus', check);
+  }, []);
 
   /// Edits one preference and saves the lot — they travel together.
   function patch(next: Partial<PlaybackPrefs>) {
@@ -343,6 +358,29 @@ export default function Settings({
             </select>
           </div>
         </section>
+
+        {android && requestIgnoreBatteryOptimizations && (
+          <section>
+            <h4>Battery</h4>
+            <div className="set-row">
+              <div className="set-label">
+                <span>Ignore battery optimization</span>
+                <small>
+                  {batteryExempt === false
+                    ? 'Android can pause syncing or stop notification/Bluetooth controls in the background without this'
+                    : batteryExempt === true
+                      ? 'Sway is exempt — background sync and playback controls should stay reliable'
+                      : 'Checking…'}
+                </small>
+              </div>
+              {batteryExempt === false && (
+                <button onClick={() => requestIgnoreBatteryOptimizations!().catch(() => {})}>
+                  Allow
+                </button>
+              )}
+            </div>
+          </section>
+        )}
 
         {showExport && (
           <section>
