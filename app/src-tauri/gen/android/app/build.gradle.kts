@@ -13,12 +13,20 @@ val tauriProperties = Properties().apply {
     }
 }
 
+val keyProperties = Properties().apply {
+    val propFile = file("key.properties")
+    if (propFile.exists()) {
+        propFile.inputStream().use { load(it) }
+    }
+}
+
 android {
     compileSdk = 36
-    namespace = "com.sway.app"
+    namespace = "com.locardium.sway"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "com.sway.app"
+        manifestPlaceholders["appLabel"] = "@string/app_name"
+        applicationId = "com.locardium.sway"
         minSdk = 26
         // 34, no 36: desde API 35 Android IMPONE edge-to-edge por sistema
         // (la app no puede optar afuera solo con codigo, ver MainActivity.kt).
@@ -27,9 +35,27 @@ android {
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
+    signingConfigs {
+        if (keyProperties.getProperty("storeFile") != null) {
+            create("release") {
+                storeFile = file(keyProperties.getProperty("storeFile"))
+                storePassword = keyProperties.getProperty("storePassword")
+                keyAlias = keyProperties.getProperty("keyAlias")
+                keyPassword = keyProperties.getProperty("keyPassword")
+            }
+        }
+    }
     buildTypes {
         getByName("debug") {
+            applicationIdSuffix = ".dev"
             manifestPlaceholders["usesCleartextTraffic"] = "true"
+            // `pnpm dev:android` installs next to the release app, not over it
+            // (the two are signed with different keys). The package suffix
+            // comes from `bundle.android.debugApplicationIdSuffix` in
+            // tauri.conf.json — the Tauri CLI rewrites `applicationIdSuffix`
+            // here on every run, so it can't be set by hand. The label tells
+            // the two apart on the phone.
+            manifestPlaceholders["appLabel"] = "Sway Dev"
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false
@@ -46,6 +72,9 @@ android {
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
                     .toList().toTypedArray()
             )
+            if (keyProperties.getProperty("storeFile") != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
     kotlinOptions {

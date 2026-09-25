@@ -1,4 +1,4 @@
-package com.sway.app
+package com.locardium.sway
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -29,15 +29,21 @@ class MainActivity : TauriActivity() {
         @Volatile
         private var live: MainActivity? = null
 
-        fun dispatchMediaButton(button: String) {
+        /// Returns whether this actually reached a live WebView. `false`
+        /// means the Activity was destroyed while the service kept playing
+        /// (see the long comment on `NativeAudioRuntime.transport`) — the
+        /// caller then falls back to native-only handling instead of the
+        /// button doing nothing.
+        fun dispatchMediaButton(button: String): Boolean {
             Log.i(TAG, "boton multimedia: $button")
-            eval("window.__swayMediaButton && window.__swayMediaButton('$button')")
+            return eval("window.__swayMediaButton && window.__swayMediaButton('$button')")
         }
 
-        private fun eval(js: String) {
-            val activity = live ?: return
-            val view = activity.webView ?: return
+        private fun eval(js: String): Boolean {
+            val activity = live ?: return false
+            val view = activity.webView ?: return false
             view.post { view.evaluateJavascript(js, null) }
+            return true
         }
     }
 
@@ -197,6 +203,7 @@ class MainActivity : TauriActivity() {
         NativeAudioRuntime.transportInterceptor = { button -> dispatchMediaButton(button) }
     }
 
+
     /// Segundo camino para los mismos botones, por las dudas.
     ///
     /// Desde Android 13 los controles de la notificacion multimedia salen del
@@ -208,12 +215,17 @@ class MainActivity : TauriActivity() {
     /// un mismo toque, el handler de JS descarta el duplicado.
     private val notificationButtons = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            when (intent?.action) {
+            val button = when (intent?.action) {
                 PlayerNotificationManager.ACTION_FAST_FORWARD,
-                PlayerNotificationManager.ACTION_NEXT -> dispatchMediaButton("next")
+                PlayerNotificationManager.ACTION_NEXT -> "next"
                 PlayerNotificationManager.ACTION_REWIND,
-                PlayerNotificationManager.ACTION_PREVIOUS -> dispatchMediaButton("prev")
+                PlayerNotificationManager.ACTION_PREVIOUS -> "prev"
+                else -> return
             }
+            // The native queue first (Fase 1.7): it answers without JS, which
+            // doesn't re-render with the app off screen. JS only when there is
+            // no queue.
+            if (!NativeAudioRuntime.mediaButton(button)) dispatchMediaButton(button)
         }
     }
 }
