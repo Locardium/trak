@@ -459,8 +459,9 @@ footer.player {
   padding: var(--space-md) var(--space-lg);
   display: grid;
   /* Columns in fr => scale continuously with the width, no jumps.
-     The sides have a small min so they don't collapse; the center leads. */
-  grid-template-columns: minmax(120px, 1fr) minmax(0, 2.4fr) minmax(120px, 1fr);
+     The sides have a min so they don't collapse; the center leads. The
+     now-playing side gets the bigger floor: what's playing must stay readable. */
+  grid-template-columns: minmax(180px, 1fr) minmax(0, 2.4fr) minmax(120px, 1fr);
   align-items: center;
   gap: clamp(var(--space-sm), 2vw, var(--space-lg));
   animation: player-in 260ms var(--ease);
@@ -504,8 +505,13 @@ footer.player.closing { animation: player-out 220ms var(--ease) forwards; }
   }
 }
 .np-text { display: flex; flex-direction: column; min-width: 0; }
-.np-text strong { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.np-artist { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Wrap instead of truncating to nothing: the title gets two lines, the artist one. */
+.np-text strong, .np-artist {
+  display: -webkit-box; -webkit-box-orient: vertical;
+  overflow: hidden; overflow-wrap: anywhere; line-height: 1.25;
+}
+.np-text strong { font-size: 13px; -webkit-line-clamp: 2; }
+.np-artist { color: var(--muted); font-size: 12px; -webkit-line-clamp: 1; }
 
 .player-center { display: flex; flex-direction: column; gap: var(--space-xs); min-width: 0; }
 .controls { display: flex; justify-content: center; align-items: center; gap: var(--space-xs); }
@@ -778,8 +784,21 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
 }
 
 /* ---------- Responsive ---------- */
-/* The player does NOT change layout at breakpoints: it scales continuously
-   (grid in fr + min-width:0 + gap with clamp). No jumps when shrinking. */
+/* The player scales continuously (grid in fr + gap with clamp) down to the
+   point where three columns no longer fit. Below that it stacks instead of
+   squeezing the title away: now-playing and the right-hand controls on top,
+   transport and seek across the full width underneath. */
+@media (max-width: 760px) {
+  :root { --player-clear: 148px; }
+  footer.player {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "np right" "center center";
+    row-gap: var(--space-sm);
+  }
+  .np { grid-area: np; }
+  .player-center { grid-area: center; }
+  .player-right { grid-area: right; }
+}
 
 /* Mobile: sidebar as a drawer + hamburger. The player stays fluid. */
 @media (max-width: 680px) {

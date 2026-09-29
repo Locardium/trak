@@ -5,6 +5,90 @@
 
 ---
 
+## 2026-09-29 · Fase 4 cerrada y commiteada
+
+- El usuario probó todo en desktop y confirmó que anda (4.1-4.6, incluida la poda de carátulas).
+- Rama `beta1-fase4` (desde `master` == `beta1-fase1-3`), un commit con todo el código de la
+  Fase 4 + `docs/progress`. Antes se restauró `gen/android/app/build.gradle.kts` con
+  `git checkout`: el CLI de Tauri (`pnpm dev:android`) reescribe la línea `applicationIdSuffix`
+  en LF y el archivo queda `w/mixed` sin cambio de contenido — pasa en cada corrida, revisarlo
+  antes de cada commit. Sin push.
+
+## 2026-09-25 · 4.6 Menú contextual del sidebar se corta abajo (reporte del usuario)
+
+- Síntoma: click derecho en una playlist cerca del borde inferior → el menú se abre hacia abajo y
+  queda cortado (sólo se ve "Rename").
+- Causa: `components/Sidebar.tsx` tenía su propio `<div className="ctx-menu">` en `left/top` del
+  cursor, sin ningún ajuste al viewport (la tabla sí usaba `ContextMenu`, que clampeaba).
+- Fix: Sidebar usa `ContextMenu` (items como `MenuItem[]`, `key` por posición para re-medir).
+  `ContextMenu.tsx`: en vez de clampear, hace flip como un menú nativo (arriba/izquierda del
+  cursor si no entra abajo/derecha, mínimo 8 px del borde) y se renderiza con `createPortal` a
+  `document.body` (dentro del drawer del sidebar en mobile, que tiene `transform`, el
+  `position: fixed` quedaba relativo al drawer y recortado).
+- Usuario sobre 4.5: "por ahora dejalo así" (le gusta pero lo ve raro; se le ofreció cambiar
+  `overflow-wrap: anywhere` → `break-word`, no respondió todavía).
+- Verificado: `pnpm tsc --noEmit` ok. Sin probar en la app.
+
+## 2026-09-25 · Prueba de Fase 4 en desktop + carátulas de temas borrados
+
+- Usuario confirmó: Reveal anda, drag hacia adentro/afuera y al Explorer anda, scroll de
+  carátulas anda. 4.5: "lo veo igual" — esperable: el apilado es `max-width: 760px` y
+  `min_inner_size` de la ventana es 720, así que en desktop sólo se nota el título en 2 líneas;
+  el cambio grande es en el celu. Pendiente que decida si queda. 4.1 sin probar.
+- Pedido: al borrar un tema, borrar su carátula. `app/src-tauri/src/cover.rs`: `prune()` corre
+  antes de `warm_missing` en el thread de `Covers::warm` — borra de `covers/` todo archivo cuyo
+  stem (hash) no tenga ningún track (incluye `.tmp` viejos), y saca de `memory` los ids que ya no
+  existen. Si la query falla no poda (una lista vacía borraría todo). `lib.rs` `delete_tracks`
+  llama `kick_background`. Cubre también borrados por sync/watcher en el próximo kick.
+- Hallazgo: `tracks.id` es `INTEGER PRIMARY KEY` sin AUTOINCREMENT → SQLite reusa el id más alto
+  borrado; un tema nuevo heredaba la carátula cacheada por id. Por eso además: `Cover.tsx`
+  exporta `keepCovers(ids)` y `App.tsx` `refreshLibrary` lo llama con los ids de la librería.
+- Verificado: `pnpm tsc --noEmit`, `cargo check` ok. Sin probar en la app.
+
+## 2026-09-25 · Fase 4 completa en código (4.1-4.5), sin commit, sin probar en desktop real
+
+- **4.3** `app/src-tauri/src/lib.rs` `reveal_track`: en Windows `.raw_arg(format!("/select,\"{path}\""))`
+  (con `.arg()` Rust envolvía todo en comillas si la ruta tenía espacios y explorer abría una
+  ventana genérica; sin espacios andaba). Barras `/` → `\`. Linux: `dbus-send ...
+  FileManager1.ShowItems` en un thread, fallback `xdg-open` de la carpeta; las comas del URI van
+  como `%2C` porque `array:string:` de dbus-send separa por coma. Lee con `db_read`.
+- **4.5** `app/src/styles.css`: columna now-playing `minmax(180px, 1fr)`; título con
+  `-webkit-line-clamp: 2`, artista 1 línea; `@media (max-width: 760px)` apila el player en 2 filas
+  (`"np right" / "center center"`) y sube `--player-clear` a 148 px (las listas reservan ese
+  espacio abajo). Aplica también al celu (ancho < 760).
+- **4.1** `app/src/App.tsx`: `plTracks` ahora es derivado de `pl: {id, tracks}` (vacío si `pl.id`
+  no es la selección actual). `refreshPlaylistTracks` es estable (deps `[]`), lee la selección de
+  `selectionRef` y sólo escribe si es el último request (`plRequest`). El effect de selección lo
+  usa (también invalida requests viejos al ir a Library). Todos los callers (drop del OS, reorder,
+  remove, delete, library-changed...) pasan por ahí, así que no hizo falta tocar cada línea que
+  listaba el plan.
+- **4.4** `app/src/dnd.ts`: `resolveTarget` salió de `beginDrag` como `targetAt(x, y, kind)`
+  exportado; nuevo handler opcional `onExit` que corta el drag interno cuando el mouse sale de la
+  ventana. `App.tsx`: `osHoverRef` muestra el indicador `dropInsertIndex` durante el drag del OS;
+  `osDropRef` calcula el índice y después de `addTracksToPlaylist` llama `reorderPlaylistTracks`
+  (el índice es sobre la lista completa y el backend descuenta los movidos que estaban antes, así
+  que el índice calculado antes del drop sirve). Posición: `p.position.toLogical(devicePixelRatio)`
+  (dpr incluye escala del monitor y zoom de página = píxeles CSS). Hacia afuera: comando
+  `drag_tracks_out(ids)` en `lib.rs` con el crate **`drag` 2.1** directo (no `tauri-plugin-drag`:
+  sin paquete JS ni capability; resuelve rutas en Rust). Corre `drag::start_drag` en el main
+  thread (DoDragDrop es modal); imagen = thumb de carátula en disco (`Covers::file`, WIC decodifica
+  JPEG) o `icons/64x64.png`. Dep sólo desktop en `app/src-tauri/Cargo.toml`. `api.ts`: `dragTracksOut`.
+- **4.2** `app/src/components/Cover.tsx`: cola global (máx 4 `cover_thumb` en vuelo, LIFO = la
+  fila que se ve ahora primero, se cancela si la fila sale del margen antes de su turno) y un
+  `IntersectionObserver` por contenedor con `root = .table-wrap` y `rootMargin: 600px 0px`
+  (con root = viewport el overflow de la tabla recorta y el margen no sirve). Observer con
+  refcount: se desconecta cuando la tabla se desmonta. Las `eager` (player/panel) usan la misma
+  cola (entran primeras por LIFO).
+- Verificado: `pnpm tsc --noEmit` ok, `cargo check` desktop ok, `cargo check --target
+  aarch64-linux-android` ok sin warnings (con `CC_aarch64_linux_android`/`AR_...` del NDK 28 y
+  `CARGO_TARGET_DIR=target/android-check`). EOL: check de STATUS vacío.
+- **Falta probar en desktop (usuario):** (1) Reveal con ruta con espacios; (2) achicar la ventana
+  < 760 px: el player apila, título visible; (3) soltar archivos en una playlist y cambiar a otra
+  antes de que termine el import: no deben aparecer ahí; (4) soltar desde Explorer entre dos filas
+  → línea indicadora y los temas quedan ahí; (5) arrastrar un tema fuera de la ventana y soltarlo
+  en el Explorer/escritorio (copia) — riesgo: que WebView2 quede creyendo que el botón sigue
+  apretado tras el DoDragDrop; (6) scroll rápido en playlist grande.
+
 ## 2026-09-25 · Commit de todo lo hecho (fases 1 y 3) + pase a Fase 4
 
 - Pedido del usuario: commitear todo y seguir con la Fase 4 en otro chat.

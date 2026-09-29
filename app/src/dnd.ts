@@ -22,6 +22,9 @@ interface Handlers {
   onHover: (payload: DragPayload, target: RawTarget) => void;
   onDrop: (payload: DragPayload, target: RawTarget) => void;
   onEnd: () => void;
+  /** The pointer left the window mid-drag: the in-window drag ends here and
+   *  this hands it over (to an OS file drag). Without it, leaving is ignored. */
+  onExit?: (payload: DragPayload) => void;
 }
 
 const THRESHOLD = 5;
@@ -29,6 +32,38 @@ const THRESHOLD = 5;
 /** True while (or right after) a drag consumed the gesture: rows' onClick
  *  handlers check this to avoid triggering selection. */
 export let didDrag = false;
+
+/** What's under (x, y) for a drag of `kind`. Also used for files dropped from
+ *  the OS, which arrive as coordinates rather than through `beginDrag`. */
+export function targetAt(x: number, y: number, kind: DragPayload['kind']): RawTarget {
+  const el = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-dnd]');
+  if (!el) return null;
+  const dnd = el.dataset.dnd;
+  if (dnd === 'row') {
+    const idx = Number(el.dataset.idx);
+    const r = el.getBoundingClientRect();
+    return { type: 'insert', index: y - r.top < r.height / 2 ? idx : idx + 1 };
+  }
+  if (dnd === 'tail') {
+    return { type: 'insert', index: Number(el.dataset.idx) };
+  }
+  if (dnd === 'node') {
+    const r = el.getBoundingClientRect();
+    const frac = (y - r.top) / r.height;
+    const nodeKind = el.dataset.nodeKind ?? 'playlist';
+    let zone: 'before' | 'after' | 'into';
+    if (kind === 'tracks') {
+      zone = 'into';
+    } else if (nodeKind === 'folder') {
+      zone = frac < 0.25 ? 'before' : frac > 0.75 ? 'after' : 'into';
+    } else {
+      zone = frac < 0.5 ? 'before' : 'after';
+    }
+    return { type: 'node', id: Number(el.dataset.nodeId), nodeKind, zone };
+  }
+  if (dnd === 'root') return { type: 'root' };
+  return null;
+}
 
 export function beginDrag(e: React.MouseEvent, payload: DragPayload, handlers: Handlers) {
   if (e.button !== 0) return;
@@ -39,36 +74,6 @@ export function beginDrag(e: React.MouseEvent, payload: DragPayload, handlers: H
   let lastTarget: RawTarget = null;
   let scrollRaf = 0;
   didDrag = false;
-
-  function resolveTarget(x: number, y: number): RawTarget {
-    const el = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-dnd]');
-    if (!el) return null;
-    const kind = el.dataset.dnd;
-    if (kind === 'row') {
-      const idx = Number(el.dataset.idx);
-      const r = el.getBoundingClientRect();
-      return { type: 'insert', index: y - r.top < r.height / 2 ? idx : idx + 1 };
-    }
-    if (kind === 'tail') {
-      return { type: 'insert', index: Number(el.dataset.idx) };
-    }
-    if (kind === 'node') {
-      const r = el.getBoundingClientRect();
-      const frac = (y - r.top) / r.height;
-      const nodeKind = el.dataset.nodeKind ?? 'playlist';
-      let zone: 'before' | 'after' | 'into';
-      if (payload.kind === 'tracks') {
-        zone = 'into';
-      } else if (nodeKind === 'folder') {
-        zone = frac < 0.25 ? 'before' : frac > 0.75 ? 'after' : 'into';
-      } else {
-        zone = frac < 0.5 ? 'before' : 'after';
-      }
-      return { type: 'node', id: Number(el.dataset.nodeId), nodeKind, zone };
-    }
-    if (kind === 'root') return { type: 'root' };
-    return null;
-  }
 
   // Auto-scroll when the cursor is near the edge of a scrollable container.
   function autoScroll(x: number, y: number) {
@@ -102,10 +107,20 @@ export function beginDrag(e: React.MouseEvent, payload: DragPayload, handlers: H
       document.body.appendChild(ghost);
       document.body.classList.add('dragging');
     }
+    if (handlers.onExit && outsideWindow(ev)) {
+      const exit = handlers.onExit;
+      cleanup();
+      exit(payload);
+      return;
+    }
     ghost!.style.transform = `translate(${ev.clientX + 14}px, ${ev.clientY + 10}px)`;
-    lastTarget = resolveTarget(ev.clientX, ev.clientY);
+    lastTarget = targetAt(ev.clientX, ev.clientY, payload.kind);
     handlers.onHover(payload, lastTarget);
     autoScroll(ev.clientX, ev.clientY);
+  }
+
+  function outsideWindow(ev: MouseEvent) {
+    return ev.clientX < 0 || ev.clientY < 0 || ev.clientX >= innerWidth || ev.clientY >= innerHeight;
   }
 
   function cleanup() {
@@ -124,7 +139,7 @@ export function beginDrag(e: React.MouseEvent, payload: DragPayload, handlers: H
 
   function onUp(ev: MouseEvent) {
     if (active) {
-      handlers.onDrop(payload, resolveTarget(ev.clientX, ev.clientY));
+      handlers.onDrop(payload, targetAt(ev.clientX, ev.clientY, payload.kind));
     }
     cleanup();
   }

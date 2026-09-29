@@ -77,6 +77,10 @@ tauri-plugin-single-instance = "2"
 # not an error: it's the answer, and with it the screen knows it shouldn't
 # offer the option.
 battery = { package = "starship-battery", version = "0.10" }
+# Dragging tracks out of the window as files (Phase 4.4). The crate under
+# tauri-plugin-drag, used directly: one Rust command resolves ids to paths,
+# so there's no JS package or capability to wire.
+drag = "2.1"
 
 # Mobile playback: Media3/ExoPlayer via native plugin, controlled from JS
 # (see app/src/nativeAudio.ts). Validated in Phase 0.5, see spike-android-audio/.

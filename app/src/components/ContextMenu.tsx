@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Check } from 'lucide-react';
 
 export interface MenuItem {
@@ -25,15 +26,16 @@ export default function ContextMenu({ x, y, items, onClose, keepOpen }: Props) {
   const [pos, setPos] = useState({ x, y });
   const anyCheckable = items.some((i) => i.checked !== undefined);
 
-  // Clamps within the viewport.
+  // Like a native menu: opens down and to the right of the cursor, and flips
+  // up / left when that side doesn't have room, instead of sliding under it.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    setPos({
-      x: Math.min(x, window.innerWidth - r.width - 8),
-      y: Math.min(y, window.innerHeight - r.height - 8),
-    });
+    const M = 8;
+    const fit = (at: number, size: number, room: number) =>
+      Math.max(M, at + size <= room - M ? at : at - size);
+    setPos({ x: fit(x, r.width, window.innerWidth), y: fit(y, r.height, window.innerHeight) });
   }, [x, y]);
 
   useEffect(() => {
@@ -53,7 +55,9 @@ export default function ContextMenu({ x, y, items, onClose, keepOpen }: Props) {
     };
   }, [onClose]);
 
-  return (
+  // Portaled to <body>: inside a transformed or scrolling ancestor (the
+  // sidebar drawer on mobile) `position: fixed` is relative to it and clipped.
+  return createPortal(
     <div ref={ref} className="ctx-menu" style={{ left: pos.x, top: pos.y }} role="menu">
       {items.map((it, i) =>
         it.separator ? (
@@ -79,6 +83,7 @@ export default function ContextMenu({ x, y, items, onClose, keepOpen }: Props) {
           </button>
         ),
       )}
-    </div>
+    </div>,
+    document.body,
   );
 }

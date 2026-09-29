@@ -251,6 +251,8 @@ export const rescanAnalysis = () => invoke<number>('rescan_analysis');
 export const coverThumb = (id: number) => invoke<string | null>('cover_thumb', { id });
 // Opens the OS file explorer showing the file.
 export const revealTrack = (id: number) => invoke<void>('reveal_track', { id });
+/** Hands an in-window drag over to the OS as a file drag; resolves on drop or cancel. */
+export const dragTracksOut = (ids: number[]) => invoke<void>('drag_tracks_out', { ids });
 
 // Auto-sync of the iTunes Music Library.xml (Phase 2). "Sync now" always
 // writes; syncXmlAfterChange is fire-and-forget and respects the toggle.

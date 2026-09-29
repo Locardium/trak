@@ -10,7 +10,7 @@ use crate::id3_sanitize::sanitize_id3v2_date_frames;
 use base64::Engine;
 use lofty::file::{TaggedFile, TaggedFileExt};
 use lofty::probe::Probe;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -137,6 +137,10 @@ impl Covers {
         let warming = self.warming.clone();
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
+            let pruned = prune(&app);
+            if pruned > 0 {
+                log::info!("[cover] removed {pruned} thumb(s) of deleted tracks");
+            }
             let made = warm_missing(&app);
             if made > 0 {
                 log::info!("[cover] made {made} thumb(s) in {:?}", t0.elapsed());
@@ -144,6 +148,43 @@ impl Covers {
             warming.store(false, Ordering::SeqCst);
         });
     }
+}
+
+/// Drops what belongs to tracks that no longer exist: thumbs whose hash no
+/// track has anymore, and the in-memory entries of deleted ids (SQLite hands
+/// a freed id to the next insert, which would otherwise inherit the cover).
+fn prune(app: &AppHandle) -> usize {
+    let state = app.state::<crate::AppState>();
+    let rows: rusqlite::Result<Vec<(i64, Option<String>)>> = {
+        let Ok(conn) = state.db_read.lock() else { return 0 };
+        conn.prepare("SELECT id, content_hash FROM tracks").and_then(|mut stmt| {
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+        })
+    };
+    // Never prune off a failed read: an empty list would wipe every thumb.
+    let rows = match rows {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[cover] could not list tracks: {e}");
+            return 0;
+        }
+    };
+    let ids: HashSet<i64> = rows.iter().map(|(id, _)| *id).collect();
+    let hashes: HashSet<String> = rows.into_iter().filter_map(|(_, h)| h).collect();
+    state.covers.memory.lock().unwrap().retain(|id, _| ids.contains(id));
+
+    let Ok(entries) = std::fs::read_dir(&state.covers.dir) else { return 0 };
+    let mut removed = 0;
+    for path in entries.flatten().map(|e| e.path()) {
+        let orphan = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|hash| !hashes.contains(hash));
+        if orphan && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 fn warm_missing(app: &AppHandle) -> usize {

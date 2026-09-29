@@ -632,10 +632,16 @@ decodifica fuera del lock. Carpeta: desktop `<Music>/Sway/covers` (junto a la DB
 `library`); Android `app_cache_dir()/covers` (ahí la carpeta de datos ES la de música que mira el
 watcher). No hecho: rootMargin/cola en `Cover.tsx`, y borrar thumbs de hashes que ya no existen.
 
+**Hecho 2026-09-25 (sin probar):** cola + rootMargin en `Cover.tsx`. Ojo: el observer necesita
+`root = .table-wrap` (el contenedor que scrollea); con el viewport como root el overflow de la
+tabla recorta las filas y el `rootMargin` no tiene efecto. Sigue sin hacer: limpiar thumbs viejos.
+
 ### 4.3 "Reveal in Explorer" no lleva al tema (notes: bug 14)
 
 `lib.rs:507-531 reveal_track` pasa `"/select,C:\ruta"` como **un solo argumento**; el quoting de
 Rust lo envuelve en comillas y explorer.exe no lo parsea, así que abre una ventana genérica.
+(Precisión 2026-09-25: Rust sólo pone comillas si la ruta tiene espacios/tabs, así que sin
+espacios andaba. Fix hecho con `raw_arg`, ver LOG.)
 
 Fix: pasar dos args (`.args(["/select,", &path])`) o armar la command line cruda. De paso, en Linux
 usar `dbus-send org.freedesktop.FileManager1.ShowItems` en vez de abrir sólo la carpeta padre
@@ -658,6 +664,11 @@ Fix:
   `devicePixelRatio` (`App.tsx:849`) en pantallas que no están al 100 %.
 - Agregar `tauri-plugin-drag` a `app/src-tauri/Cargo.toml` y `app/package.json`, y llamar
   `startDrag` con las rutas de los tracks seleccionados desde el `onMouseDown` de la fila.
+
+**Hecho 2026-09-25 (sin probar), distinto al plan:** en vez del plugin se usa su crate de abajo
+(`drag`) desde un comando propio `drag_tracks_out(ids)` (rutas resueltas en Rust, sin paquete JS
+ni capability). No arranca en `onMouseDown`: el drag interno sigue igual y cuando el mouse sale
+de la ventana (`onExit` en `dnd.ts`) se pasa al drag del OS. Detalle en LOG.
 
 ### 4.5 Título / artista siempre visibles (notes: AGREGAR)
 

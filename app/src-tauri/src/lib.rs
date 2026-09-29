@@ -408,6 +408,8 @@ fn delete_tracks(app: AppHandle, state: State<AppState>, ids: Vec<i64>) -> Resul
         db::delete_tracks(&mut conn, &music, &ids).map_err(|e| e.to_string())?;
     }
     autosync::note_change(&app);
+    // Clears their covers (files and cache) on the background pass.
+    kick_background(&app);
     Ok(())
 }
 
@@ -559,28 +561,113 @@ fn cue_for_track(
 #[tauri::command]
 fn reveal_track(state: State<AppState>, id: i64) -> Result<(), String> {
     let path = {
-        let conn = state.db.lock().unwrap();
+        let conn = state.db_read.lock().unwrap();
         db::track_path(&conn, id).map_err(|e| e.to_string())?
     };
+    // explorer.exe parses its own command line: `/select,"C:\a b\c.flac"` must reach it
+    // verbatim. `.arg()` would wrap the whole thing in quotes and explorer would just open
+    // a generic window.
     #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer")
-        .arg(format!("/select,{path}"))
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    {
+        use std::os::windows::process::CommandExt;
+        let path = path.replace('/', "\\");
+        std::process::Command::new("explorer")
+            .raw_arg(format!("/select,\"{path}\""))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     #[cfg(target_os = "macos")]
     std::process::Command::new("open")
         .args(["-R", &path])
         .spawn()
         .map_err(|e| e.to_string())?;
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let dir = std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/"));
-        std::process::Command::new("xdg-open")
-            .arg(dir)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
+    // FileManager1.ShowItems selects the file in Nautilus/Dolphin/Nemo/...; without a
+    // file manager on the session bus, fall back to opening the parent folder.
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(move || {
+        let shown = tauri::Url::from_file_path(&path).ok().is_some_and(|uri| {
+            std::process::Command::new("dbus-send")
+                .args([
+                    "--session",
+                    "--print-reply",
+                    "--dest=org.freedesktop.FileManager1",
+                    "--type=method_call",
+                    "/org/freedesktop/FileManager1",
+                    "org.freedesktop.FileManager1.ShowItems",
+                    // dbus-send splits array items on commas; %2C is the same URI.
+                    &format!("array:string:{}", uri.as_str().replace(',', "%2C")),
+                    "string:",
+                ])
+                .output()
+                .is_ok_and(|o| o.status.success())
+        });
+        if !shown {
+            let dir = std::path::Path::new(&path).parent().unwrap_or(std::path::Path::new("/"));
+            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+        }
+    });
+    // Nothing to reveal in on Android: the menu doesn't offer it there.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let _ = path;
     Ok(())
+}
+
+/// Drags tracks out of the window as files (to Explorer, a DJ app, a DAW...).
+/// JS calls it once its own in-window drag leaves the window, with the button
+/// still down: the OS drag picks up from there. Resolves when it's dropped or
+/// cancelled. The first track's cover is the drag image.
+#[tauri::command]
+async fn drag_tracks_out(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+) -> Result<(), String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = (app, window, state, ids);
+        Err("not supported on mobile".into())
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let (files, cover_of) = {
+            let conn = state.db_read.lock().unwrap();
+            let mut files = Vec::with_capacity(ids.len());
+            for id in &ids {
+                files.push(std::path::PathBuf::from(db::track_path(&conn, *id).map_err(|e| e.to_string())?));
+            }
+            let cover_of: Option<(String, Option<String>)> = ids.first().and_then(|id| {
+                conn.query_row(
+                    "SELECT path, content_hash FROM tracks WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok()
+            });
+            (files, cover_of)
+        };
+        let image = cover_of
+            .and_then(|(path, hash)| state.covers.file(hash.as_deref()?, std::path::Path::new(&path), false))
+            .map(drag::Image::File)
+            .unwrap_or_else(|| drag::Image::Raw(include_bytes!("../icons/64x64.png").to_vec()));
+
+        // OLE/GTK drags run on the UI thread and block it until the drop.
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            #[cfg(target_os = "linux")]
+            let target = window.gtk_window();
+            #[cfg(not(target_os = "linux"))]
+            let target = tauri::Result::Ok(window);
+            let r = match target {
+                Ok(w) => drag::start_drag(&w, drag::DragItem::Files(files), image, |_, _| {}, Default::default())
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(r);
+        })
+        .map_err(|e| e.to_string())?;
+        rx.recv().map_err(|e| e.to_string())?
+    }
 }
 
 #[tauri::command]
@@ -2014,6 +2101,7 @@ pub fn run() {
             set_volume,
             cover_thumb,
             reveal_track,
+            drag_tracks_out,
             get_track_path,
             track_cue,
             queue_cues,

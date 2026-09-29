@@ -4,18 +4,15 @@
 > Detalle de cada ítem (causa raíz, archivos, fix): `PLAN-BETA1.md`. Historia: `LOG.md`.
 > Lista original del usuario: `notes.txt` (raíz, gitignoreado).
 
-**Última actualización:** 2026-09-25
-**Fase actual:** Fase 4 — Bugs visuales y flujo en desktop (el usuario la eligió 2026-09-25;
-Fase 2 queda para después).
+**Última actualización:** 2026-09-29
+**Fase actual:** ninguna en curso. Fase 4 cerrada y commiteada 2026-09-29 (rama `beta1-fase4`).
 **Próximo paso (en este orden):**
-1. **Fase 4**, empezando por lo corto: **4.3** (Reveal in Explorer no selecciona el archivo),
-   **4.5** (título/artista siempre visibles en el player), **4.1** (tema que aparece en otra
-   playlist, race en `plTracks`), **4.4** (drag & drop), y lo que falta de **4.2** (rootMargin /
-   cola en `Cover.tsx`). Ver plan Fase 4; verificar `archivo:línea` contra el código.
-2. Pendiente de confirmación en uso real (hecho, el usuario no lo dijo explícito): 1.2/1.3/1.4
-   (lag y notificación de sync con pantalla apagada), 1.6 (botones en background largo), 4.2
-   (carátulas cacheadas).
-3. Después: Fase 2 (2.1-2.4, estado de conexión con el server — hacerla junta), Fase 5.
+1. **Fase 2** (2.1-2.4, estado de conexión con el server — hacerla junta).
+2. **Fase 5** (5.1 artefactos del release en `dist/<tag>/` + APK; 5.2 README del server en Linux).
+3. Pendiente de confirmación en uso real (hecho, el usuario no lo dijo explícito): 1.2/1.3/1.4
+   (lag y notificación de sync con pantalla apagada), 1.6 (botones en background largo), y 1.7
+   parte A tras matar el proceso. 1.7 parte B (reanudación Media3 con proceso muerto) en reserva.
+4. Fase 6 (rediseño de UI) se planea aparte después.
 
 **Todo lo de las fases 1 y 3 está commiteado** (2026-09-25, rama `beta1-fase1-3`, ver LOG).
 Ojo con los finales de línea: varios archivos del repo son CRLF en el índice (`git ls-files
@@ -87,11 +84,19 @@ Leyenda: ⬜ pendiente · 🟡 en curso · ✅ hecho y verificado · 🧪 hecho,
 - ✅ 3.3 Stop en la notificación + stop nativo único, hecho 2026-09-25 (botón de la UI sigue chico)
 
 ## Fase 4 — Desktop visual / flujo
-- ⬜ 4.1 Música aparece en la otra playlist (race en `plTracks`)
-- 🧪 4.2 Carátulas: caché en disco + pre-generado en background hecho 2026-09-25 (falta rootMargin/cola)
-- ⬜ 4.3 Reveal in Explorer no selecciona el archivo
-- ⬜ 4.4 Drag & drop: posición al soltar + arrastrar hacia afuera (`tauri-plugin-drag`)
-- ⬜ 4.5 Título/artista siempre visibles en el player
+- ✅ 4.1 Música aparece en la otra playlist — estado `{id, tracks}` + request counter (2026-09-25)
+- ✅ 4.2 Carátulas: caché en disco + pre-generado en background + cola (4 en vuelo, LIFO,
+  cancelación) + observer con root `.table-wrap` y margen 600 px. Scroll confirmado por el
+  usuario. Borrado de carátulas de temas borrados (poda en el pase de background).
+- ✅ 4.3 Reveal in Explorer: `raw_arg` en Windows, `FileManager1.ShowItems` en Linux. Confirmado.
+- ✅ 4.4 Drag & drop: drop del OS en la posición + indicador; drag hacia afuera con el crate
+  `drag` (comando `drag_tracks_out`). Confirmado (adentro, afuera, al Explorer).
+- ✅ 4.6 (extra, reportado 2026-09-25) Menú de click derecho del sidebar se cortaba abajo en vez
+  de abrirse hacia arriba. Sidebar ahora usa `ContextMenu` (flip arriba/izquierda + portal a body).
+- ✅ 4.5 Título/artista siempre visibles: min 180 px, título en 2 líneas, apila bajo 760 px.
+  El usuario lo deja así; el detalle fino va a la Fase 6.
+
+Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que debería andar").
 
 ## Fase 5 — Release y docs
 - ⬜ 5.1 Todos los artefactos del release en `dist/<tag>/` (+ APK)

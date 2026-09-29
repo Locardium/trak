@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronRight, FolderPlus, Library, ListMusic, Plus } from 'lucide-react';
 import { PlaylistNode, NodeKind } from '../api';
+import ContextMenu, { MenuItem } from './ContextMenu';
 
 export type Selection = { type: 'library' } | { type: 'playlist'; id: number };
 
@@ -42,16 +43,27 @@ export default function Sidebar({
     if (editingId != null) editRef.current?.select();
   }, [editingId]);
 
-  useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
-    window.addEventListener('click', close);
-    window.addEventListener('contextmenu', close, true);
-    return () => {
-      window.removeEventListener('click', close);
-      window.removeEventListener('contextmenu', close, true);
-    };
-  }, [menu]);
+  const closeMenu = useCallback(() => setMenu(null), []);
+
+  function menuItems(node: PlaylistNode | null): MenuItem[] {
+    if (!node) {
+      return [
+        { label: 'New playlist', onClick: () => onCreate('playlist', null) },
+        { label: 'New folder', onClick: () => onCreate('folder', null) },
+      ];
+    }
+    return [
+      ...(node.kind === 'folder'
+        ? [
+            { label: 'New playlist here', onClick: () => onCreate('playlist', node.id) },
+            { label: 'New folder here', onClick: () => onCreate('folder', node.id) },
+            { label: '', separator: true },
+          ]
+        : []),
+      { label: 'Rename', onClick: () => setEditingId(node.id) },
+      { label: 'Delete', danger: true, onClick: () => onDelete(node.id) },
+    ];
+  }
 
   // Children by parent, built once. Filtering the whole list for each node
   // while drawing the tree is quadratic, and the tree redraws on every
@@ -189,28 +201,14 @@ export default function Sidebar({
       </div>
 
       {menu && (
-        <div className="ctx-menu" style={{ left: menu.x, top: menu.y }}>
-          {menu.node ? (
-            <>
-              {menu.node.kind === 'folder' && (
-                <>
-                  <button onClick={() => onCreate('playlist', menu.node!.id)}>New playlist here</button>
-                  <button onClick={() => onCreate('folder', menu.node!.id)}>New folder here</button>
-                  <hr />
-                </>
-              )}
-              <button onClick={() => setEditingId(menu.node!.id)}>Rename</button>
-              <button className="danger" onClick={() => onDelete(menu.node!.id)}>
-                Delete
-              </button>
-            </>
-          ) : (
-            <>
-              <button onClick={() => onCreate('playlist', null)}>New playlist</button>
-              <button onClick={() => onCreate('folder', null)}>New folder</button>
-            </>
-          )}
-        </div>
+        <ContextMenu
+          // A new right-click reopens it at the new spot, measured again.
+          key={`${menu.x},${menu.y}`}
+          x={menu.x}
+          y={menu.y}
+          items={menuItems(menu.node)}
+          onClose={closeMenu}
+        />
       )}
     </aside>
   );

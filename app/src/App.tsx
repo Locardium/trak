@@ -34,6 +34,7 @@ import {
   seekTo,
   setVolume as setVolumeBackend,
   revealTrack,
+  dragTracksOut,
   syncXmlAfterChange,
   watchConditions,
   getUiSetting,
@@ -42,9 +43,10 @@ import {
   nativeQueue,
   type PlaybackPrefs,
 } from './api';
-import { beginDrag, didDrag, DragPayload, RawTarget } from './dnd';
+import { beginDrag, didDrag, DragPayload, RawTarget, targetAt } from './dnd';
 import { isAndroid } from './platform';
 import { useUiSetting } from './uiSettings';
+import { keepCovers } from './components/Cover';
 import Sidebar, { Selection, NodeDropHint } from './components/Sidebar';
 import TrackTable from './components/TrackTable';
 import PlayerBar, { RepeatMode, REPEAT_LABEL } from './components/PlayerBar';
@@ -99,7 +101,13 @@ export default function App() {
     (s) => (s.type === 'library' ? 'library' : String(s.id)),
     { enabled: isAndroid(), writeDelayMs: 0 },
   );
-  const [plTracks, setPlTracks] = useState<Track[]>([]);
+  // Tagged with the playlist they belong to: a load that lands after the user
+  // moved to another playlist must not show its tracks there.
+  const [pl, setPl] = useState<{ id: number; tracks: Track[] } | null>(null);
+  const plTracks = useMemo(
+    () => (selection.type === 'playlist' && pl?.id === selection.id ? pl.tracks : []),
+    [selection, pl],
+  );
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState('');
   const [modal, setModal] = useState<ModalState>(null);
@@ -180,14 +188,24 @@ export default function App() {
   const refreshLibrary = useCallback(async () => {
     const tracks = await listTracks();
     setLibrary(tracks);
+    keepCovers(new Set(tracks.map((t) => t.id)));
     return tracks;
   }, []);
   const refreshPlaylists = useCallback(async () => {
     setNodes(await listPlaylists());
   }, []);
+  // Always loads whatever is selected *now* (callers finishing a slow import
+  // hold an old `selection`), and only the latest request gets to write.
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const plRequest = useRef(0);
   const refreshPlaylistTracks = useCallback(async () => {
-    if (selection.type === 'playlist') setPlTracks(await playlistTracks(selection.id));
-  }, [selection]);
+    const req = ++plRequest.current;
+    const sel = selectionRef.current;
+    if (sel.type !== 'playlist') return;
+    const tracks = await playlistTracks(sel.id).catch(() => [] as Track[]);
+    if (req === plRequest.current) setPl({ id: sel.id, tracks });
+  }, []);
 
   // Initial load with retries (the backend may take a while to register its state).
   useEffect(() => {
@@ -232,10 +250,8 @@ export default function App() {
   useEffect(() => {
     setSelected(new Set());
     setSearch('');
-    if (selection.type === 'playlist') {
-      playlistTracks(selection.id).then(setPlTracks).catch(() => setPlTracks([]));
-    }
-  }, [selection]);
+    refreshPlaylistTracks();
+  }, [selection, refreshPlaylistTracks]);
 
   // State poll (desktop). Android doesn't use it: the native plugin pushes
   // its state, see the effect below.
@@ -913,7 +929,7 @@ export default function App() {
       const patch = (ts: Track[]) =>
         ts.map((t) => (t.id === id ? { ...t, gainDb } : t));
       setLibrary(patch);
-      setPlTracks(patch);
+      setPl((p) => p && { id: p.id, tracks: patch(p.tracks) });
       setGainLive(null);
     }, 400);
   }
@@ -948,11 +964,28 @@ export default function App() {
 
   // --- OS file drop ---------------------------------------------------------
 
+  // Files from the OS land where they're dropped: on a sidebar node, or
+  // between two rows of the open playlist (same targets as an internal drag).
+  const osHoverRef = useRef<(x: number, y: number) => void>(() => {});
+  osHoverRef.current = (x, y) => {
+    const t = targetAt(x, y, 'tracks');
+    if (t?.type === 'node') {
+      setNodeDropHint({ nodeId: t.id, zone: 'into' });
+      setDropInsertIndex(null);
+    } else if (t?.type === 'insert' && canReorder) {
+      setDropInsertIndex(t.index);
+      setNodeDropHint(null);
+    } else {
+      clearDropHints();
+    }
+  };
+
   const osDropRef = useRef<(paths: string[], x: number, y: number) => void>(() => {});
   osDropRef.current = async (paths, x, y) => {
-    const el = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-dnd="node"]');
-    const nodeId = el ? Number(el.dataset.nodeId) : null;
-    const nodeKind = el?.dataset.nodeKind ?? null;
+    const t = targetAt(x, y, 'tracks');
+    const nodeId = t?.type === 'node' ? t.id : null;
+    const nodeKind = t?.type === 'node' ? t.nodeKind : null;
+    const insertAt = t?.type === 'insert' && canReorder ? t.index : null;
     setStatus('Importing…');
     try {
       const ids = await importFiles(paths);
@@ -976,6 +1009,8 @@ export default function App() {
         }
       } else if (selection.type === 'playlist') {
         const n = await addTracksToPlaylist(selection.id, ids);
+        // Added at the end, then moved to the gap it was dropped on.
+        if (insertAt != null) await reorderPlaylistTracks(selection.id, ids, insertAt);
         setStatus(`Imported ${ids.length}, added ${n} to the playlist.`);
       } else {
         setStatus(`Imported ${ids.length} tracks to the Library.`);
@@ -995,19 +1030,18 @@ export default function App() {
     if (!('__TAURI_INTERNALS__' in window)) return;
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
       const p = event.payload;
-      const scale = window.devicePixelRatio || 1;
-      if (p.type === 'over' || p.type === 'enter') {
-        const el = document
-          .elementFromPoint(p.position.x / scale, p.position.y / scale)
-          ?.closest<HTMLElement>('[data-dnd="node"][data-node-kind]');
-        setNodeDropHint(
-          el ? { nodeId: Number(el.dataset.nodeId), zone: 'into' } : null,
-        );
-      } else if (p.type === 'drop') {
-        setNodeDropHint(null);
-        osDropRef.current(p.paths, p.position.x / scale, p.position.y / scale);
+      if (p.type === 'leave') {
+        clearDropHints();
+        return;
+      }
+      // Tauri reports physical pixels; the DOM wants CSS pixels.
+      // devicePixelRatio covers both the monitor's scaling and page zoom.
+      const { x, y } = p.position.toLogical(window.devicePixelRatio || 1);
+      if (p.type === 'drop') {
+        clearDropHints();
+        osDropRef.current(p.paths, x, y);
       } else {
-        setNodeDropHint(null);
+        osHoverRef.current(x, y);
       }
     });
     return () => {
@@ -1085,6 +1119,12 @@ export default function App() {
       onHover: onDragHover,
       onDrop: onDragDrop,
       onEnd: clearDropHints,
+      // Past the window's edge the drag becomes a file drag other apps take.
+      onExit: isAndroid()
+        ? undefined
+        : (p) => {
+            if (p.kind === 'tracks') dragTracksOut(p.ids).catch((err: unknown) => setStatus(String(err)));
+          },
     });
   }
 
