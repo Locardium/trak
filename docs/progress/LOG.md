@@ -5,6 +5,19 @@
 
 ---
 
+## 2026-09-29 · Limpieza de ramas de git
+
+- Pedido del usuario: entender las ramas, borrar/unir lo que sobre y dejar todo commiteado.
+- Estado encontrado: `master` == `origin/master` == `beta1-fase1-3` (2cc0762, las fases 1+3 ya
+  estaban pusheadas); `beta1-fase4` = master + 1 commit (93e7833); `backup-pre-rewrite`
+  (c3a680a, 2026-08-21) = historia vieja anterior a una reescritura, sin ancestro común con
+  master, pero su árbol es **idéntico** al de `df8a67b` en master; stash `pre-rewrite wip`
+  (9188120, 2026-08-25) = versiones viejas de TrackTable/lib.rs/styles.css ya superadas en
+  `6f462b9` y posteriores.
+- Hecho: fast-forward de `master` a `beta1-fase4`; borradas `beta1-fase1-3`, `beta1-fase4`,
+  `backup-pre-rewrite` (con OK del usuario) y el stash (con OK). Recuperables un tiempo por reflog
+  / `git fsck --unreachable` con esos hashes. Queda sólo `master`, adelante de origin. Sin push.
+
 ## 2026-09-29 · Fase 4 cerrada y commiteada
 
 - El usuario probó todo en desktop y confirmó que anda (4.1-4.6, incluida la poda de carátulas).

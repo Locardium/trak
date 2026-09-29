@@ -5,7 +5,10 @@
 > Lista original del usuario: `notes.txt` (raíz, gitignoreado).
 
 **Última actualización:** 2026-09-29
-**Fase actual:** ninguna en curso. Fase 4 cerrada y commiteada 2026-09-29 (rama `beta1-fase4`).
+**Fase actual:** ninguna en curso. Fase 4 cerrada y commiteada 2026-09-29.
+**Git:** sólo existe `master` (fases 1, 3 y 4 adentro). Las ramas `beta1-fase1-3`,
+`beta1-fase4`, `backup-pre-rewrite` y el stash viejo se borraron 2026-09-29 (ver LOG). El push
+lo hace el usuario.
 **Próximo paso (en este orden):**
 1. **Fase 2** (2.1-2.4, estado de conexión con el server — hacerla junta).
 2. **Fase 5** (5.1 artefactos del release en `dist/<tag>/` + APK; 5.2 README del server en Linux).
@@ -14,7 +17,7 @@
    parte A tras matar el proceso. 1.7 parte B (reanudación Media3 con proceso muerto) en reserva.
 4. Fase 6 (rediseño de UI) se planea aparte después.
 
-**Todo lo de las fases 1 y 3 está commiteado** (2026-09-25, rama `beta1-fase1-3`, ver LOG).
+**Todo lo de las fases 1, 3 y 4 está commiteado en `master`** (ver LOG).
 Ojo con los finales de línea: varios archivos del repo son CRLF en el índice (`git ls-files
 --eol`); si un editor/script los deja en LF, el diff sale entero. Antes de commitear:
 `git ls-files --eol | awk '$1=="i/crlf" && $2!="w/crlf"'` debe salir vacío.
