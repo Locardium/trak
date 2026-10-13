@@ -23,10 +23,50 @@ I built **Trak** to solve these exact problems. It is a modern, lightweight desk
 
 * **Legacy Export First**: Trak natively creates standard iTunes-compatible XML files, ensuring your manual playlist orders and folder hierarchies carry over perfectly to Rekordbox and Serato.
 * **All Formats Welcome**: Native support for **FLAC**, MP3, WAV, and more. No conversions needed.
-* **Safe-by-Design File Integrity**: Your files are sacred. Trak uses a built-in virtual recycle bin to store out-of-scope files for 30 days before removal. You'll never accidentally lose a track from your hard drive again.
-* **Real-time P2P Synchronization**: Easily sync your tracks and database between multiple PCs and your phone over your local network using fast peer-to-peer (P2P) transfers.
-* **Your Own Backup & Remote Server**: Run a headless backup server where all your tracks from all devices are safely uploaded. You can also fetch tracks from this server remotely in real time using secure P2P connections.
-* **Advanced Player & Volume Normalization**: Pre-listen to your sets with seamless crossfades, gapless playback, and smart volume normalization targeting **-6.0 LUFS** (no more sudden volume jumps between tracks!).
+* **Safe-by-Design File Integrity**: Your files are sacred. Anything Trak deletes — by you or by a sync — goes to its own trash first and stays there for 30 days (90 on the server) before it's really removed. You'll never accidentally lose a track from your hard drive again.
+* **Real-time P2P Synchronization**: Your PCs and your phone find each other on the local network and sync tracks and playlists directly, device to device (P2P), end-to-end encrypted.
+* **Your Own Backup & Remote Server** (optional): Run a headless server that keeps a backup of every track and playlist from all your devices. It also bridges them: when two devices aren't on the same network, each one syncs with the server and the changes reach the other through it, even if the other one is offline at the time.
+* **Advanced Player & Volume Normalization**: Pre-listen to your sets with seamless crossfades, gapless playback, and smart volume normalization targeting **-14 LUFS** without pushing peaks past -1 dBFS (no more sudden volume jumps between tracks!).
+
+---
+
+## Install
+
+Downloads are on the [latest release](https://github.com/Locardium/trak/releases/latest).
+
+* **Windows, installer** (`Trak-setup.exe`): installs to `C:\Program Files\Trak` by default, or
+  any folder you pick. It asks for admin once, to make that folder writable; Trak itself runs
+  without admin.
+* **Windows, portable** (`Trak-portable.exe`): no installer. Put it in any folder you can write
+  to and open it.
+* **Android** (`Trak.apk`).
+
+On Windows, Trak keeps **everything next to the program**: the database, the `library` folder
+with your music, covers and its trash. Back up or move that folder and you've moved your whole
+library. Uninstalling removes the program and leaves that data where it is.
+
+## Running the Server
+
+The server is optional: a box that keeps a copy of everything your devices send it, and lets
+them sync away from home. On Linux, no Rust needed:
+
+```bash
+sudo useradd --system --home /var/lib/trak --create-home trak
+sudo curl -L -o /usr/local/bin/trak-server https://github.com/Locardium/trak/releases/latest/download/trak-server-linux
+sudo chmod +x /usr/local/bin/trak-server
+cd /var/lib/trak && sudo -u trak /usr/local/bin/trak-server
+```
+
+The first run writes `config.toml` (with the `pair_token` you'll type in the app) and exits.
+Review it, then run it under systemd. Or with Docker:
+
+```bash
+cd crates/server
+echo "TRAK_SERVER_TOKEN=$(openssl rand -hex 24)" > .env
+docker compose up -d
+```
+
+Full guide (config, systemd unit, Docker, security): [`crates/server/README.md`](crates/server/README.md).
 
 ---
 
@@ -53,12 +93,12 @@ trak/
 ├── crates/
 │   ├── core/             # Central engine (SQLite db, sync logic, encryption, ID3, wire protocol)
 │   ├── native-audio/     # Custom fork of tauri-plugin-native-audio for Android/iOS playback
-│   └── server/           # Headless synchronization server (axum/tokio-based CLI)
+│   └── server/           # Headless archive and sync server (no UI, runs anywhere, Docker too)
 └── scripts/              # Release automation scripts
 ```
 
-- **`crates/core`**: Decoupled engine handling SQLite database merges (`rusqlite`), `blake3` file hashing, metadata parsing, and the secure **ChaCha20-Poly1305** encrypted raw socket network protocol (`wire.rs`).
-- **`crates/server`**: Headless backend daemon designed to run on a Linux VPS (like Ubuntu headless) to act as a centralized backup node.
+- **`crates/core`**: Decoupled engine handling SQLite database merges (`rusqlite`), `blake3` file hashing, metadata parsing, and the versioned sync protocol over an encrypted TCP channel (**Noise XX**, ChaCha20-Poly1305; `wire.rs`).
+- **`crates/server`**: Headless daemon (a single static binary, or a Docker image) designed to run on a Linux box or VPS as a central backup and sync node.
 - **`app/src-tauri`**: Controls OS-specific file watchers, loudness analysis, and iTunes XML generation.
 - **`app/`**: A Vite single-page application communicating with Tauri's Rust API. On Android, it routes playback commands natively to Media3/ExoPlayer.
 
@@ -68,7 +108,7 @@ trak/
 
 ### Prerequisites
 Make sure you have installed:
-- **Rust** 1.75+
+- **Rust** (latest stable)
 - **Node.js** 18+ and **pnpm**
 - **Android SDK** (if testing/building for Android)
 
@@ -94,7 +134,7 @@ pnpm install
 
 ### Compiling Release Bundles
 
-- **Build Windows Desktop Installer (`.msi`)**:
+- **Build Windows Desktop Installer (NSIS `-setup.exe`; `target/release/trak.exe` is the portable build)**:
   ```bash
   pnpm run build:win
   ```
@@ -113,6 +153,11 @@ pnpm install
 - **Build All Targets**:
   ```bash
   pnpm run build:all
+  ```
+- **Publish a Release** (bumps the version, builds everything into `dist/<tag>/`, creates the
+  GitHub release):
+  ```bash
+  pnpm run release:win 1.0.0-beta.2
   ```
 
 ---

@@ -444,7 +444,7 @@ fn fnv1a_hex(s: &str) -> String {
     format!("{:016X}", fnv1a(s))
 }
 
-fn fnv1a(s: &str) -> u64 {
+pub(crate) fn fnv1a(s: &str) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in s.as_bytes() {
         hash ^= *b as u64;

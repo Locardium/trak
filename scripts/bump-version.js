@@ -34,5 +34,8 @@ bumpJson("package.json");
 bumpJson("app/package.json");
 bumpJson("app/src-tauri/tauri.conf.json");
 bumpCargoToml("app/src-tauri/Cargo.toml");
+// The server reports its version to the devices (wire.rs `Version` frame), so
+// "update trak-server" messages need it to move with the app.
+bumpCargoToml("crates/server/Cargo.toml");
 
 console.log("\nDone. Review the diff, then commit.");

@@ -14,6 +14,24 @@ What it's for, in two concrete cases:
 - **Recovering.** If every device's library is lost, the files and the
   organization are still here.
 
+## Quick start on Linux
+
+No Rust needed: grab the binary from the latest release.
+
+```
+sudo useradd --system --home /var/lib/trak --create-home trak
+sudo curl -L -o /usr/local/bin/trak-server   https://github.com/Locardium/trak/releases/latest/download/trak-server-linux
+sudo chmod +x /usr/local/bin/trak-server
+cd /var/lib/trak && sudo -u trak /usr/local/bin/trak-server
+```
+
+That first run writes `/var/lib/trak/config.toml` with a new `pair_token` and
+exits. Review it (see [Running](#running)), then install the
+[systemd unit](#systemd) so it starts on boot, and open port 7420 on the
+router. In the app: Sync → add server → the address and the `pair_token`.
+
+Prefer containers? See [Docker](#docker).
+
 ## Building
 
 ```
@@ -66,7 +84,10 @@ compiled for the target.
 
 With no argument it uses `config.toml` from the current directory. The first
 run writes that file with a new token and exits, so you can review it before
-opening the port:
+opening the port. (Unless `TRAK_SERVER_TOKEN` is set: then there is nothing
+to copy out of the file, so it is written with defaults and an empty
+`pair_token`, and the server starts right away.) The same file, commented, is
+in [`config.example.toml`](config.example.toml):
 
 ```toml
 listen = "0.0.0.0:7420"
@@ -98,7 +119,7 @@ pair_token = "..."
 ### Versions
 
 The server and the apps speak a versioned sync protocol. The startup log says
-which one (`protocol 2 (accepts 2+)`). When a device connects with a protocol
+which one (`protocol 3 (accepts 3+)`). When a device connects with a protocol
 out of range, nothing syncs and both sides say who has to update: the app
 shows **Update needed** on the server, and the server logs a line like
 `... runs a newer Trak (...): update trak-server` or
@@ -155,6 +176,29 @@ long as they used to. It's best to update the server before the app.
   again requires unpairing it first, by hand.
 - The port needs to be reachable from outside: port forwarding on the router
   or a public IP. That's the only thing that needs to be exposed.
+
+## Docker
+
+The image runs the same binary, as a non-root user, with everything it keeps
+(`config.toml`, `data/`, `music/`) in the `/srv/trak` volume. From this
+folder, with Docker Compose ([`docker-compose.yml`](docker-compose.yml)):
+
+```
+echo "TRAK_SERVER_TOKEN=$(openssl rand -hex 24)" > .env
+docker compose up -d
+```
+
+The token in `.env` is what you type in the app to pair. The library ends up
+in `./trak-data` next to the compose file; change that line to put it on the
+big disk. No `network_mode: host` needed: the server doesn't use mDNS
+(devices add it by address), only port 7420.
+
+Without Compose, from the repo root:
+
+```
+docker build -f crates/server/Dockerfile -t trak-server .
+docker run -d --name trak-server --restart unless-stopped   -p 7420:7420 -e TRAK_SERVER_TOKEN=... -v /srv/trak:/srv/trak trak-server
+```
 
 ## systemd
 

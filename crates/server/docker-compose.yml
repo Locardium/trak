@@ -1,0 +1,21 @@
+# Trak server with Docker Compose (Phase 5.6). From this folder:
+#
+#   TRAK_SERVER_TOKEN=<a long random string> docker compose up -d
+#
+# or put the token in a `.env` file next to this one. That token is what you
+# type in the app to pair a device with the server.
+services:
+  trak-server:
+    build:
+      context: ../..
+      dockerfile: crates/server/Dockerfile
+    image: trak-server
+    restart: unless-stopped
+    ports:
+      - "7420:7420"
+    environment:
+      TRAK_SERVER_TOKEN: ${TRAK_SERVER_TOKEN:?set TRAK_SERVER_TOKEN}
+    volumes:
+      # config.toml, data/ (the database) and music/ (the files). Point it at
+      # the big disk.
+      - ./trak-data:/srv/trak

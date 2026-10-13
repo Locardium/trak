@@ -70,17 +70,24 @@ impl Config {
     /// Loads the file. If it doesn't exist, writes it with a new token and
     /// returns `None`: the first run doesn't start listening, it just prints
     /// what to do.
+    ///
+    /// Except when the token comes from `TOKEN_ENV` (Docker and the like):
+    /// then there is nothing the user has to read first, so the file is
+    /// written with defaults and an empty `pair_token` — the secret stays
+    /// out of it — and the server starts right away.
     pub fn load_or_create(path: &Path) -> Result<Option<Self>> {
+        Self::load_or_create_with(path, token_from_env())
+    }
+
+    /// `load_or_create` with the environment's token passed in, so tests
+    /// don't have to touch process-wide variables.
+    fn load_or_create_with(path: &Path, env_token: Option<String>) -> Result<Option<Self>> {
         if path.exists() {
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("could not read {}", path.display()))?;
             let mut cfg: Config = toml::from_str(&text)
                 .with_context(|| format!("{} is not valid TOML", path.display()))?;
-            if let Some(from_env) = std::env::var(Self::TOKEN_ENV)
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-            {
+            if let Some(from_env) = env_token {
                 log::info!("[server] token taken from {}", Self::TOKEN_ENV);
                 cfg.pair_token = from_env;
             }
@@ -89,11 +96,26 @@ impl Config {
             }
             return Ok(Some(cfg));
         }
+        if let Some(from_env) = env_token {
+            std::fs::write(path, template(""))
+                .with_context(|| format!("could not write {}", path.display()))?;
+            let mut cfg: Config = toml::from_str(&template("")).expect("the template is valid TOML");
+            log::info!("[server] wrote {} with defaults; token taken from {}", path.display(), Self::TOKEN_ENV);
+            cfg.pair_token = from_env;
+            return Ok(Some(cfg));
+        }
         let token = uuid::Uuid::new_v4().simple().to_string();
         std::fs::write(path, template(&token))
             .with_context(|| format!("could not write {}", path.display()))?;
         Ok(None)
     }
+}
+
+fn token_from_env() -> Option<String> {
+    std::env::var(Config::TOKEN_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Written by hand instead of with `toml::to_string` so the comments can
@@ -132,6 +154,8 @@ retention_days = 90
 # six-digit code, because there is no screen here to compare it on. Treat it
 # like a password. Changing it (and restarting) unpairs every device paired
 # with the old one: they have to pair again with the new token.
+# Left empty when the token comes from the TRAK_SERVER_TOKEN environment
+# variable, which always wins over this value.
 pair_token = "{token}"
 "#
     )
@@ -190,6 +214,24 @@ mod tests {
         let cfg = Config::load_or_create(&path).unwrap().unwrap();
         assert_eq!(cfg.retention_days, 90);
         assert_eq!(cfg.music_dir, PathBuf::from("music"));
+    }
+
+    #[test]
+    fn with_the_token_in_the_environment_the_first_run_starts() {
+        let path = tmp("env");
+        let cfg = Config::load_or_create_with(&path, Some("secret".into()))
+            .unwrap()
+            .expect("nothing to read first: it starts");
+        assert_eq!(cfg.pair_token, "secret");
+        assert_eq!(cfg.listen, "0.0.0.0:7420");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("pair_token = \"\""), "the secret stays out of the file");
+        // Next start: the file exists, the environment still wins.
+        let again = Config::load_or_create_with(&path, Some("secret".into())).unwrap().unwrap();
+        assert_eq!(again.pair_token, "secret");
+        // Without the variable, the empty token stops it instead of
+        // starting a server nobody can pair with.
+        assert!(Config::load_or_create_with(&path, None).is_err());
     }
 
     #[test]

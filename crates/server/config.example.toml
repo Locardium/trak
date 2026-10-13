@@ -1,0 +1,38 @@
+# Example config for trak-server. Copy it to config.toml (the real one is
+# gitignored: it holds the pair_token) or let the first run write it for you.
+#
+# Trak archive and sync server.
+#
+# Keeps whatever your devices send it and hands it back when they ask. It
+# never imports music on its own: everything it has, someone sent it.
+
+# Where to listen. 0.0.0.0 accepts connections from outside this machine.
+listen = "0.0.0.0:7420"
+
+# How it shows up in the device list in the app.
+name = "Trak Server"
+
+# The database: identity of every track, playlists, and per-device state.
+#
+# CAREFUL with Windows paths: a backslash is an escape in TOML. Write
+# 'D:\Music' with SINGLE quotes, or "D:/Music" with forward slashes.
+data_dir = "data"
+
+# The audio files. This is what grows - point it at the big disk.
+music_dir = "music"
+
+# How many days a deleted file survives in the server's trash.
+#
+# Deletions travel: delete on one device and it is gone from all of them, the
+# server included. This is the only thing that makes it recoverable
+# afterwards. At 0 it is destroyed right away - an exact mirror of your
+# devices, with no safety net.
+retention_days = 90
+
+# What you type in the app to pair a device with this server. It replaces the
+# six-digit code, because there is no screen here to compare it on. Treat it
+# like a password. Changing it (and restarting) unpairs every device paired
+# with the old one: they have to pair again with the new token.
+# Left empty when the token comes from the TRAK_SERVER_TOKEN environment
+# variable, which always wins over this value.
+pair_token = "change-me: a long random string, or leave empty and set TRAK_SERVER_TOKEN"

@@ -1,5 +1,7 @@
 mod autosync;
 mod cover;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod data_dir;
 mod discovery;
 mod export_xml;
 mod pairing;
@@ -40,13 +42,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
-
-/// Desktop dev builds (`tauri dev`, debug assertions on) are a separate app
-/// from the release: their own folder under `<Music>` (db, library, covers,
-/// webview profile), their own single-instance lock and their own name on
-/// the network. Otherwise running dev on the machine that has the release
-/// installed would work on — and sync from — the real library.
-pub(crate) const DATA_DIR: &str = if cfg!(debug_assertions) { "Trak Dev" } else { "Trak" };
 
 /// TEMPORARY — diagnostics.
 ///
@@ -111,7 +106,8 @@ pub struct AppState {
     db_read: Mutex<Connection>,
     player: Player,
     covers: cover::Covers,
-    /// Managed folder (<Music>/Trak): everything imported is copied here.
+    /// Managed folder (`<data>/library` on desktop): everything imported is
+    /// copied here.
     music_dir: PathBuf,
     /// Trak devices seen on the local network (Phase 5.1).
     peers: discovery::Peers,
@@ -1488,8 +1484,21 @@ fn set_auto_sync_xml(state: State<AppState>, enabled: bool) -> Result<(), String
     db::set_auto_sync_xml(&conn, enabled).map_err(|e| e.to_string())
 }
 
+/// The folder Trak keeps everything in, for Settings to show (5.4). On
+/// desktop it's the one the executable runs from, with the music in
+/// `library/` inside it.
+#[tauri::command]
+fn data_folder(state: State<AppState>) -> String {
+    let dir = if cfg!(target_os = "android") {
+        state.music_dir.as_path()
+    } else {
+        state.music_dir.parent().unwrap_or(&state.music_dir)
+    };
+    dir.display().to_string()
+}
+
 /// Small pieces of UI state the frontend owns (column layout, and whatever
-/// comes next). They go through the db so they land in `<Music>/Trak`, next
+/// comes next). They go through the db so they land in the data folder, next
 /// to everything else Trak owns — the webview's own `localStorage` would put
 /// them under AppData, which is the one place none of our data belongs.
 ///
@@ -1512,110 +1521,6 @@ fn set_ui_setting(state: State<AppState>, key: String, value: String) -> Result<
 /// owns (`device_uid`, `auto_sync_xml`, …).
 fn ui_key(key: &str) -> String {
     format!("ui.{key}")
-}
-
-/// Empties `%LOCALAPPDATA%\com.locardium.trak.player`, once, the first time a build
-/// that keeps the webview profile in the music folder runs.
-///
-/// Only `Local Storage` is carried across, and for one reason: it holds the
-/// settings the frontend is about to migrate into the db (column layout,
-/// shuffle, repeat, volume). Pointing the webview at an empty directory
-/// without it would lose them silently.
-///
-/// Everything else in that profile is disposable — caches, shader caches,
-/// metrics, hyphenation data, filter lists. On a real profile that was 166 MB
-/// against 16 KB of settings. WebView2 rebuilds all of it on demand, so it is
-/// dropped rather than dragged along; copying it would move the junk instead
-/// of getting rid of it.
-///
-/// Best effort throughout: what is at stake is four preferences, not the
-/// library, so it is never worth failing startup over.
-#[cfg(target_os = "windows")]
-fn adopt_legacy_webview_profile(app: &AppHandle, target: &std::path::Path) {
-    let Ok(legacy) = app.path().app_local_data_dir() else {
-        return;
-    };
-    if !legacy.exists() {
-        return; // nothing there: a clean install, or already cleaned up
-    }
-    // Carrying the settings only makes sense the first time, before the new
-    // profile exists — after that the live ones are the truth.
-    if !target.exists() {
-        // The webview is not running yet — this is still `setup` — so the
-        // database behind Local Storage is not open and is safe to copy.
-        const LOCAL_STORAGE: &str = r"EBWebView\Default\Local Storage";
-        let from = legacy.join(LOCAL_STORAGE);
-        if from.exists() {
-            match copy_dir_all(&from, &target.join(LOCAL_STORAGE)) {
-                Ok(()) => eprintln!("[webview] settings carried out of AppData"),
-                Err(e) => {
-                    // Leaves the old profile alone so the next launch can
-                    // retry, rather than deleting the only copy.
-                    std::fs::remove_dir_all(target).ok();
-                    eprintln!("[webview] could not carry the settings out of AppData ({e})");
-                    return;
-                }
-            }
-        }
-    }
-    // Attempted on EVERY startup while the directory is still there, not just
-    // the run that created the new profile. The first attempt routinely fails
-    // in part: WebView2 keeps its own processes alive briefly after the app
-    // closes, and they still hold files inside the old profile. Each run
-    // clears what it can and the folder disappears within a launch or two.
-    remove_dir_all_best_effort(&legacy);
-    if legacy.exists() {
-        eprintln!("[webview] {} not fully removed yet, retrying next launch", legacy.display());
-    } else {
-        eprintln!("[webview] removed {}", legacy.display());
-    }
-}
-
-/// `std::fs::remove_dir_all` gives up on the first entry it cannot handle,
-/// which leaves the rest of a large browser profile behind. This one keeps
-/// going, and deletes a reparse point as a link rather than descending into
-/// whatever it points at.
-#[cfg(target_os = "windows")]
-fn remove_dir_all_best_effort(dir: &std::path::Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(meta) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if meta.is_dir() && !meta.file_type().is_symlink() {
-            remove_dir_all_best_effort(&path);
-            std::fs::remove_dir(&path).ok();
-        } else if meta.is_dir() {
-            std::fs::remove_dir(&path).ok(); // the link, never the target
-        } else {
-            if meta.permissions().readonly() {
-                let mut perms = meta.permissions();
-                #[allow(clippy::permissions_set_readonly_false)]
-                perms.set_readonly(false);
-                std::fs::set_permissions(&path, perms).ok();
-            }
-            std::fs::remove_file(&path).ok();
-        }
-    }
-    std::fs::remove_dir(dir).ok();
-}
-
-#[cfg(target_os = "windows")]
-fn copy_dir_all(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        let dest = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_all(&entry.path(), &dest)?;
-        } else {
-            std::fs::copy(entry.path(), &dest)?;
-        }
-    }
-    Ok(())
 }
 
 /// Called by the frontend after every mutation (import, playlists, tracks).
@@ -1820,15 +1725,18 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
     });
 }
 
-/// On desktop dev the identifier gets `.dev`, like the Android dev app. The
-/// single-instance plugin derives its lock from it: with the release's
-/// identifier, launching dev while the release is open would just focus the
-/// release window and exit.
-fn context() -> tauri::Context<tauri::Wry> {
+/// On desktop the identifier gets a suffix per data folder: the
+/// single-instance plugin derives its lock from it, so each folder (dev, the
+/// installed copy, a portable one) is its own instance — see
+/// `data_dir::instance_suffix`.
+fn context(#[allow(unused_variables)] data_dir: Option<&std::path::Path>) -> tauri::Context<tauri::Wry> {
     #[allow(unused_mut)]
     let mut ctx = tauri::generate_context!();
-    #[cfg(all(debug_assertions, not(any(target_os = "android", target_os = "ios"))))]
-    ctx.config_mut().identifier.push_str(".dev");
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if let Some(dir) = data_dir {
+        let suffix = data_dir::instance_suffix(dir);
+        ctx.config_mut().identifier.push_str(&format!(".{suffix}"));
+    }
     ctx
 }
 
@@ -1868,6 +1776,20 @@ pub fn run() {
             .with_tag("trak"),
     );
 
+    // Desktop: checked before anything else, so a copy in a folder it can't
+    // write to says so instead of crashing on `db open`.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let data_dir = {
+        let dir = data_dir::resolve();
+        if let Err(e) = data_dir::check_writable(&dir) {
+            data_dir::fail_not_writable(&dir, &e);
+        }
+        Some(dir)
+    };
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let data_dir: Option<PathBuf> = None;
+    let ctx = context(data_dir.as_deref());
+
     #[allow(unused_mut)] // mut is only needed in the cfg blocks below
     let mut builder = tauri::Builder::default();
     // Desktop only: a second launch focuses the running window instead of
@@ -1892,23 +1814,20 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_native_audio::init());
     }
     builder
-        .setup(|app| {
+        .setup(move |app| {
             // Travels with the protocol version, so a mismatch can say which
             // version the other side runs (2.8).
             trak_core::wire::set_app_version(&app.package_info().version.to_string());
-            // Everything Trak owns lives next to the user's music, not in
-            // AppData: on desktop that's `<Music>/Trak`, so the db travels
-            // with the library instead of being orphaned on reinstall. On
-            // Android `audio_dir()` is already private to the app
-            // (`getExternalFilesDir(DIRECTORY_MUSIC)`), so no extra nesting.
-            let audio_dir = app
-                .path()
-                .audio_dir()
-                .unwrap_or_else(|_| app.path().app_data_dir().expect("app data dir"));
-            let dir = if cfg!(target_os = "android") {
-                audio_dir
-            } else {
-                audio_dir.join(DATA_DIR)
+            // Never AppData. On desktop everything sits in the folder the
+            // executable runs from (`data_dir.rs`). On Android `audio_dir()`
+            // is already private to the app
+            // (`getExternalFilesDir(DIRECTORY_MUSIC)`).
+            let dir = match data_dir {
+                Some(dir) => dir,
+                None => app
+                    .path()
+                    .audio_dir()
+                    .unwrap_or_else(|_| app.path().app_data_dir().expect("app data dir")),
             };
             // Read by `default_device_name` the first time the db is
             // created: without it dev would show up to peers with the same
@@ -1918,6 +1837,7 @@ pub fn run() {
                 std::env::set_var("TRAK_DEVICE_NAME", format!("{} Dev", pc.trim()));
             }
             std::fs::create_dir_all(&dir).ok();
+            eprintln!("[data] folder: {}", dir.display());
             let db_file = dir.join("db.sqlite");
             // TEMPORARY — see `perf_line`. Truncated on every startup so
             // what's read is always from the current run.
@@ -1934,7 +1854,7 @@ pub fn run() {
                 .unwrap_or(-1);
             eprintln!("[db] tracks at startup: {n}");
             // Managed folder for the actual audio files, kept apart from
-            // the db so browsing `Music/Trak` in a file manager shows a
+            // the db so browsing the data folder in a file manager shows a
             // clean `library` folder instead of db/log files mixed in.
             let music_dir = if cfg!(target_os = "android") {
                 dir.clone()
@@ -2060,8 +1980,8 @@ pub fn run() {
             // its own (`manager/webview.rs`: "we do respect
             // user-specification"). Without this, WebView2 keeps its whole
             // profile — cache, cookies, local storage — under
-            // `%LOCALAPPDATA%\com.locardium.trak.player`, and nothing Trak owns belongs
-            // outside the music folder.
+            // `%LOCALAPPDATA%\<identifier>`, and nothing Trak owns belongs
+            // outside its data folder.
             //
             // Last thing in setup, after `manage`: the webview starts
             // invoking commands the moment it exists, and those commands
@@ -2069,7 +1989,6 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             {
                 let webview_dir = dir.join("webview");
-                adopt_legacy_webview_profile(app.handle(), &webview_dir);
                 std::fs::create_dir_all(&webview_dir).ok();
                 eprintln!("[webview] profile: {}", webview_dir.display());
                 tauri::WebviewWindowBuilder::new(
@@ -2128,6 +2047,7 @@ pub fn run() {
             get_auto_sync_xml,
             set_auto_sync_xml,
             get_ui_setting,
+            data_folder,
             set_ui_setting,
             sync_xml_after_change,
             get_auto_sync_p2p,
@@ -2156,6 +2076,6 @@ pub fn run() {
             free_space,
             sync_history
         ])
-        .run(context())
+        .run(ctx)
         .expect("error while running tauri application");
 }

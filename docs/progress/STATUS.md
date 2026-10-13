@@ -12,9 +12,13 @@ aislado" y Fase 2). Fase 4 cerrada y commiteada 2026-09-29.
 `beta1-fase4`, `backup-pre-rewrite` y el stash viejo se borraron 2026-09-29 (ver LOG). El push
 lo hace el usuario.
 **Próximo paso (en este orden, actualizado 2026-10-13):**
--1. Fase 5 en curso (sin commit): 5.5 licencia hecha, 5.3 rename Sway → Trak hecho (falta
-   probar Android con `pnpm dev:android`), sigue 5.4 (portable + instalador NSIS), después 5.1
-   y 5.2 (usan los nombres y artefactos nuevos).
+-1. Fase 5 en curso. Commit `e996dbf` = 5.3 rename + 5.5 licencia. Sin commit: 5.4, 5.1, 5.2,
+   5.6 (ver abajo). Falta que el usuario: (a) pruebe el instalador
+   `target/release/bundle/nsis/Trak_1.0.0-1_x64-setup.exe` (instalar en Program Files, abrir,
+   importar, actualizar instalando de nuevo, desinstalar → la biblioteca tiene que quedar);
+   (b) `pnpm dev:android`; (c) renombre el repo de GitHub a `Locardium/trak` ANTES del primer
+   release (los READMEs ya apuntan a `github.com/Locardium/trak/releases/latest/download/...`);
+   (d) pruebe Docker (no hay Docker en esta PC).
 0. Fase 2 completa, confirmada en device y commiteada (2.1-2.12, 2026-10-13; último commit
    `d76327f`). Sin push. Sigue la Fase 5. Antes de cada commit:
    `gen/android/app/build.gradle.kts` sale `w/mixed` por el CLI de Tauri → `git checkout`.
@@ -183,8 +187,22 @@ Leyenda: ⬜ pendiente · 🟡 en curso · ✅ hecho y verificado · 🧪 hecho,
 Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que debería andar").
 
 ## Fase 5 — Release y docs
-- ⬜ 5.1 Todos los artefactos del release en `dist/<tag>/` (+ APK)
-- ⬜ 5.2 README: cómo correr el server en Linux
+- 🧪 5.1 (hecho 2026-10-13, sin commit, sin correr) `scripts/release-win.js` reescrito: sin
+  la conversión de versión de WiX (NSIS acepta `1.0.0-beta.2`; Tauri usa sólo los números en
+  `VIProductVersion`), `cargo update --workspace` tras el bump, build win + android + servers,
+  staging en `dist/<tag>/` con nombres fijos (`Trak-setup.exe`, `Trak-portable.exe`,
+  `Trak.apk`, `trak-server-windows.exe`, `trak-server-linux`; sólo archivos generados en esta
+  corrida) y `gh release create` desde ahí. `bump-version.js` ahora también bumpea
+  `crates/server/Cargo.toml`. `dist/` ya estaba ignorado (`**/dist/`). Imagen Docker NO se
+  publica desde el script (no hay Docker acá).
+- 🧪 5.2 (hecho 2026-10-13, sin commit) README raíz: secciones "Install" (instalador,
+  portable, APK, datos junto al programa) y "Running the Server" (quickstart Linux + Docker),
+  build:win ya no dice `.msi`, `pnpm release:win`. `crates/server/README.md`: "Quick start on
+  Linux", nota de `TRAK_SERVER_TOKEN` al primer arranque, protocolo 3, sección Docker.
+  `crates/server/config.example.toml` (generado del template de `config.rs`).
+  README corregido contra el código (2026-10-13): −14 LUFS (`db::TARGET_LUFS`) con techo
+  −1 dBFS, papelera 30 días en devices (`trash::RETENTION_DAYS`) / 90 en el server, server sin
+  axum/tokio, canal Noise XX, Rust "latest stable".
 - 🧪 5.3 (hecho 2026-10-13, sin commit, falta probar en device) Rename Sway → Trak en todo el
   código (65 archivos, ver LOG). Crates `trak-core`/`trak-server`/`trak` (lib `trak_lib`),
   mDNS `_trak._tcp`, env `TRAK_DEVICE_NAME`/`TRAK_SERVER_TOKEN`, Android
@@ -195,15 +213,32 @@ Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que deber�
   carpeta del repo ni el repo de GitHub (`Locardium/sway`, lo renombra el usuario después). Tests core,
   server, app y `tsc` pasan. Falta: `pnpm dev:android` (paquete Kotlin movido a
   `com/locardium/trak/player`, se borró el `generated/` viejo; el CLI lo regenera).
-- ⬜ 5.4 (pedido 2026-10-13) Dos builds de Windows: portable e instalable, TODO directo en la
-  carpeta del exe (sin subcarpeta `data`). Sale de `<Music>`. Decidido: instalador NSIS (sin
-  MSI), pide admin una vez, default `C:\Program Files\Trak`, el usuario puede elegir otra
-  carpeta; el instalador da Modify a Users (SID `*S-1-5-32-545`) sobre la carpeta y se lo saca
-  a `Trak.exe` y al desinstalador. Desinstalar/actualizar NO borra los datos. Sin migración:
-  el usuario mueve `Music\Sway` a mano (documentar). Ver PLAN 5.4.
-- ⬜ 5.6 (pedido 2026-10-13) Server en Docker: `Dockerfile` (binario musl estático sobre imagen
-  mínima), volúmenes para config/data/music, puerto 7420, `docker-compose.yml` de ejemplo,
-  imagen publicada en el release (GHCR). Ver PLAN 5.6.
+- 🧪 5.4 (pedido 2026-10-13, hecho sin commit) Portable + instalable, TODO directo en la
+  carpeta del exe (sin subcarpeta `data`). Hecho: `app/src-tauri/src/data_dir.rs` (carpeta =
+  la del exe; dev = `target/app-dev`; AppImage = carpeta del .AppImage; chequeo de escritura
+  con MessageBox si no se puede; sufijo del identifier por carpeta → lock de instancia única
+  por carpeta), `lib.rs` sin `DATA_DIR` ni `adopt_legacy_webview_profile`, comando
+  `data_folder` + fila "Data folder" en Settings (desktop). Instalador NSIS perMachine
+  (`tauri.conf.json` `bundle.windows.nsis`, `build:win --bundles nsis`, sin MSI) con
+  `app/src-tauri/windows/hooks.nsh`: icacls Users Modify en `$INSTDIR`, `Trak.exe` y
+  `uninstall.exe` sin herencia (Users RX). El desinstalador de Tauri 2.11.4 sólo borra el exe,
+  el uninstaller y `RMDir $INSTDIR` sin /r → los datos quedan (verificado en el template).
+  Probado: `pnpm build:win` arma `Trak_1.0.0-1_x64-setup.exe` (el `.nsi` generado incluye
+  `hooks.nsh`, `MAINBINARYNAME` = `trak`); portable copiado a una carpeta y abierto con otro
+  cwd → `db.sqlite`, `library/`, `covers/`, `webview/` al lado del exe, nada en
+  `%LOCALAPPDATA%`; en carpeta con escritura denegada → MessageBox y no crea nada.
+  Falta (usuario, pide UAC): instalar/actualizar/desinstalar.
+  Sin migración: el usuario mueve `Music\Sway` a mano (contenido de esa carpeta → carpeta de
+  Trak). Ver PLAN 5.4.
+  Además, en 5.6: con `TRAK_SERVER_TOKEN` seteado y sin config, el server arranca con
+  defaults en vez de escribir el config y salir (pedido del usuario).
+- 🧪 5.6 (hecho 2026-10-13, sin commit, SIN PROBAR: no hay Docker en esta PC)
+  `crates/server/Dockerfile` (rust:1.96-alpine → alpine:3.22, usuario 10001, volumen
+  `/srv/trak`, workdir ahí), `crates/server/docker-compose.yml` (token desde `.env`),
+  `.dockerignore` en la raíz. Server: si no hay config y está `TRAK_SERVER_TOKEN`, escribe el
+  config con defaults y `pair_token = ""` y arranca (`Config::load_or_create_with`, test
+  `with_the_token_in_the_environment_the_first_run_starts`). Pendiente: publicar la imagen
+  en GHCR (manual o CI).
 - 🧪 5.5 (pedido y hecho 2026-10-13, sin commit) Licencia BSL 1.1: `LICENSE` en la raíz (texto
   oficial de SPDX `BUSL-1.1`, Terms idénticos), Licensor Locardium, Additional Use Grant = uso
   personal, pruebas y self-hosting gratis; prohibido uso comercial. Change Date 4 años por
@@ -225,4 +260,6 @@ Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que deber�
   pantalla.
 - Sigue instalada en el celu la app vieja `com.sway.app` (0.1.0) — pendiente que el usuario la
   borre, no urgente.
-- Versión (`tauri.conf.json`/`Cargo.toml`) sigue en `1.0.0-1`, nunca se bumpeó.
+- Versión: `1.0.0-beta.2` desde 2026-10-13 (app, tauri.conf, server; `bump-version.js` +
+  `cargo update --workspace`). Próximo release: `pnpm release:win 1.0.0-beta.2`. Semver: la
+  1.0.0 final no salió, así que las betas siguen `1.0.0-beta.N` (no `1.0.1-beta`).

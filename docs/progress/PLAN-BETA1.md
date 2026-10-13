@@ -759,6 +759,8 @@ sección en el README. Gotcha: `Config::load_or_create` en el primer arranque es
 SALE (`config.rs:73-99`) → el contenedor muere la primera vez. Opciones: documentarlo (editar y
 `docker compose up` de nuevo) o que con `TRAK_SERVER_TOKEN` seteado arranque directo con
 defaults. Decidir al implementar. Publicar imagen en GHCR desde el script de release (5.1).
+Resuelto 2026-10-13: con `TRAK_SERVER_TOKEN` y sin config, arranca con defaults (ver LOG).
+GHCR queda pendiente (no hay Docker en la PC de build).
 
 ---
 

@@ -62,8 +62,11 @@ tools/itunes-xml-poc/*.xml
 /config.toml
 /crates/server/config.toml
 # Y el nombre viejo, por si queda alguno dando vueltas.
-/trak-server.toml
-/crates/server/trak-server.toml
+/sway-server.toml
+/crates/server/sway-server.toml
+# Volumen del docker-compose de ejemplo (config con token + música).
+/crates/server/trak-data/
+/crates/server/.env
 
 # === Secretos / entorno ===
 .env

@@ -27,7 +27,7 @@ const DEFAULT_COLS: ColDef[] = [
   { key: 'duration', label: 'Duration', weight: 0.7, visible: true, numeric: true },
 ];
 
-/// Where the layout lives now: a db setting, so the file is `<Music>/Trak`.
+/// Where the layout lives now: a db setting, so it lives in the data folder.
 const COLS_SETTING = 'columns.v2';
 /// Where it used to live: the webview's `localStorage`, which sits in the
 /// browser profile under AppData. Read once on startup to carry an existing
@@ -120,7 +120,7 @@ function TrackTable({
   rowMenuItems,
   tapToPlay = false,
 }: Props) {
-  // Order, widths and visibility, stored in the db (so: `<Music>/Trak`) and
+  // Order, widths and visibility, stored in the db (so: the data folder) and
   // carried across from the webview's localStorage on first run after the
   // move. The hook owns the read-then-write ordering and the throttling.
   const [cols, setCols] = useUiSetting<ColDef[]>(COLS_SETTING, DEFAULT_COLS, parseCols, serializeCols, {

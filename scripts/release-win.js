@@ -1,12 +1,16 @@
-// Bump version, commit, tag, build Windows app + Windows/Linux server, publish GitHub Release.
+// Bump version, commit, tag, build every artifact, stage them in dist/<tag>/
+// and publish the GitHub Release from there (Phase 5.1).
 // Usage: node scripts/release-win.js 1.0.0-beta.1
 //
-// The tag / GitHub release name use this version as-is. WiX's msi target
-// only accepts a numeric-only pre-release, so any non-numeric pre-release
-// (e.g. "beta.1") is auto-reduced to its digits ("1") just for the version
-// written into package.json / tauri.conf.json / Cargo.toml.
+// What ends up in dist/<tag>/ (and in the release), with fixed names so
+// `releases/latest/download/<name>` links keep working across versions:
+//   Trak-setup.exe            Windows installer (NSIS)
+//   Trak-portable.exe         the same app, no installer: keeps its data next to itself
+//   Trak.apk                  Android
+//   trak-server-windows.exe   server
+//   trak-server-linux         server, static (musl)
 //
-// If anything fails after the tag is pushed (build, missing binary, gh
+// If anything fails after the tag is pushed (build, missing artifact, gh
 // release), the tag is deleted locally and on origin so a retry starts
 // clean. The version-bump commit is never rolled back — it's harmless on
 // its own and reverting it automatically risks reverting other people's
@@ -15,22 +19,16 @@ const { execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const label = process.argv[2];
-if (!label || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/.test(label)) {
+const version = process.argv[2];
+if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/.test(version)) {
   console.error("Usage: node scripts/release-win.js <version>  (e.g. 1.0.0-beta.1)");
   process.exit(1);
 }
 
-const [core, pre] = label.split(/-(.+)/);
-const numericPre = pre ? pre.replace(/\D/g, "") || "1" : null;
-const version = numericPre ? `${core}-${numericPre}` : core;
-if (version !== label) {
-  console.log(`msi needs a numeric-only pre-release: building as ${version} (release tag stays ${label})`);
-}
-
 const root = path.resolve(__dirname, "..");
-const isPrerelease = label.includes("-");
-const tag = `v${label}`;
+const isPrerelease = version.includes("-");
+const tag = `v${version}`;
+const dist = path.join(root, "dist", tag);
 
 function run(cmd) {
   console.log(`\n$ ${cmd}`);
@@ -60,6 +58,33 @@ function rollbackTag() {
   }
 }
 
+/// The newest file under `dir` (recursively) whose name passes `test`.
+function newest(dir, test) {
+  let best = null;
+  const walk = (d) => {
+    if (!fs.existsSync(d)) return;
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (test(e.name, p)) {
+        const t = fs.statSync(p).mtimeMs;
+        if (!best || t > best.t) best = { p, t };
+      }
+    }
+  };
+  walk(dir);
+  if (!best) throw new Error(`Nothing matching in ${dir}`);
+  return best.p;
+}
+
+function stage(from, name) {
+  if (!fs.existsSync(from)) throw new Error(`Missing artifact: ${from}`);
+  const to = path.join(dist, name);
+  fs.copyFileSync(from, to);
+  console.log(`  ${name}  <-  ${path.relative(root, from)}`);
+  return to;
+}
+
 // 1. Refuse to run with uncommitted changes, so the release commit is clean.
 const status = execSync("git status --porcelain", { cwd: root }).toString().trim();
 if (status) {
@@ -72,8 +97,11 @@ if (localTagExists()) {
   process.exit(1);
 }
 
-// 2. Bump version across package.json / tauri.conf.json / Cargo.toml.
+// 2. Bump the version everywhere (app, Android, server), and the lockfile
+// entries of our own crates with it, so the builds below don't leave the
+// tree dirty.
 run(`node scripts/bump-version.js ${version}`);
+run(`cargo update --workspace`);
 
 // 3. Commit (if the bump actually changed anything) + push, before tagging.
 run(`git add -A`);
@@ -90,44 +118,42 @@ run(`git tag ${tag}`);
 run(`git push origin ${tag}`);
 
 try {
-  // 5. Build Windows app bundle + Windows/Linux server binaries.
+  // 5. Build everything.
+  const started = Date.now();
   run(`pnpm build:win`);
+  run(`pnpm build:android`);
   run(`pnpm server:build-win`);
   run(`pnpm server:build-linux`);
 
-  // 6. Find the generated .msi.
-  const msiDir = path.join(root, "target/release/bundle/msi");
-  const msiFile = fs.readdirSync(msiDir).find((f) => f.endsWith(".msi"));
-  if (!msiFile) {
-    throw new Error(`No .msi found in ${msiDir}`);
-  }
-  const msiPath = path.join(msiDir, msiFile);
-  console.log(`\nFound bundle: ${msiPath}`);
+  // 6. Stage into dist/<tag>/. Only files this run produced: an old APK or
+  // installer left in the build folders must not ship under the new tag.
+  const fresh = (p) => fs.statSync(p).mtimeMs >= started;
+  fs.rmSync(dist, { recursive: true, force: true });
+  fs.mkdirSync(dist, { recursive: true });
+  console.log(`\nStaging in ${path.relative(root, dist)}:`);
+  const files = [
+    stage(
+      newest(path.join(root, "target/release/bundle/nsis"), (n, p) => n.endsWith("-setup.exe") && n.includes(version) && fresh(p)),
+      "Trak-setup.exe"
+    ),
+    stage(path.join(root, "target/release/trak.exe"), "Trak-portable.exe"),
+    stage(
+      newest(path.join(root, "app/src-tauri/gen/android/app/build/outputs/apk"), (n, p) => n.endsWith("-release.apk") && fresh(p)),
+      "Trak.apk"
+    ),
+    stage(path.join(root, "target/release/trak-server.exe"), "trak-server-windows.exe"),
+    stage(path.join(root, "target/x86_64-unknown-linux-musl/release/trak-server"), "trak-server-linux"),
+  ];
 
-  const serverWinPath = path.join(root, "target/release/trak-server.exe");
-  if (!fs.existsSync(serverWinPath)) {
-    throw new Error(`No server binary found at ${serverWinPath}`);
-  }
-
-  const serverLinuxPath = path.join(
-    root,
-    "target/x86_64-unknown-linux-musl/release/trak-server"
-  );
-  if (!fs.existsSync(serverLinuxPath)) {
-    throw new Error(`No server binary found at ${serverLinuxPath}`);
-  }
-
-  // 7. Publish GitHub Release with the app + both server binaries attached.
+  // 7. Publish the GitHub Release from the staged files.
   const prereleaseFlag = isPrerelease ? "--prerelease" : "";
   run(
     `gh release create ${tag} ` +
-      `"${msiPath}" ` +
-      `"${serverWinPath}#trak-server-windows.exe" ` +
-      `"${serverLinuxPath}#trak-server-linux" ` +
-      `--title "Trak ${tag}" ${prereleaseFlag} --notes "Trak ${tag}"`
+      files.map((f) => `"${f}"`).join(" ") +
+      ` --title "Trak ${tag}" ${prereleaseFlag} --notes "Trak ${tag}"`
   );
 
-  console.log(`\nDone. Release ${tag} published.`);
+  console.log(`\nDone. Release ${tag} published from ${path.relative(root, dist)}.`);
 } catch (e) {
   console.error(`\nRelease step failed: ${e.message}`);
   rollbackTag();

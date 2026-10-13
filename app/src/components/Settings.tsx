@@ -4,6 +4,7 @@ import { ChevronRight } from 'lucide-react';
 import { Modal } from './Modal';
 import { Switch } from './Switch';
 import {
+  dataFolder,
   exportLibraryXmlNow,
   getAutoSyncXml,
   importFromUri,
@@ -90,6 +91,10 @@ export default function Settings({
   // Re-checked on window focus: the exemption dialog is a separate system
   // Activity, and this is what's back on screen once the user answers it.
   const [batteryExempt, setBatteryExempt] = useState<boolean | null>(null);
+  const [folder, setFolder] = useState('');
+  useEffect(() => {
+    dataFolder().then(setFolder).catch(() => {});
+  }, []);
   useEffect(() => {
     if (!isIgnoringBatteryOptimizations) return;
     const check = () => isIgnoringBatteryOptimizations!().then(setBatteryExempt).catch(() => {});
@@ -214,16 +219,17 @@ export default function Settings({
       <div className="settings">
         <section>
           <h4>Library</h4>
-          <div className="set-row">
-            <div className="set-label">
-              <span>Managed folder</span>
-              <small>Imported files are copied here</small>
+          {!android && (
+            <div className="set-row">
+              <div className="set-label">
+                <span>Data folder</span>
+                <small>Library, database and covers, next to Trak</small>
+              </div>
+              <div className="set-control">
+                <code className="set-path">{folder}</code>
+              </div>
             </div>
-            <div className="set-control">
-              <code className="set-path">&lt;Music&gt;/Trak</code>
-              <button disabled>Change…</button>
-            </div>
-          </div>
+          )}
           {android && (
             <div className="set-row">
               <div className="set-label">

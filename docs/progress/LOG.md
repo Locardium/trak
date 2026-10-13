@@ -5,6 +5,29 @@
 
 ---
 
+## 2026-10-13 · 5.4 portable/instalador, 5.1 release, 5.2 READMEs, 5.6 Docker (sin commit)
+
+- 5.4: `app/src-tauri/src/data_dir.rs` nuevo (`resolve`, `check_writable`, `instance_suffix`,
+  `fail_not_writable` con `MessageBoxW`; feature `Win32_UI_WindowsAndMessaging` en `windows`).
+  `lib.rs`: fuera `DATA_DIR`, `adopt_legacy_webview_profile`, `remove_dir_all_best_effort`,
+  `copy_dir_all`; `context(data_dir)` agrega `.<fnv32 de la carpeta>` al identifier (antes
+  `.dev` en debug) → lock de instancia única por carpeta; comando `data_folder`.
+  `export_xml::fnv1a` pasó a `pub(crate)`. Settings: fila "Data folder" (desktop) en vez de
+  `<Music>/Trak` + botón "Change…" deshabilitado. `tauri.conf.json`: `bundle.windows.nsis`
+  perMachine + `installerHooks: ./windows/hooks.nsh`; `build:win` → `--bundles nsis`.
+- Verificación 5.4: ver STATUS (portable con cwd distinto, carpeta sin escritura, `.nsi`
+  generado). Template NSIS de Tauri 2.11.4 revisado: el desinstalador borra sólo el exe y el
+  uninstaller y hace `RMDir "$INSTDIR"` sin `/r`; la casilla "Delete app data" sólo borra
+  `%APPDATA%`/`%LOCALAPPDATA%\<bundle id>` (nada nuestro). La página de reinstalación corre el
+  uninstaller viejo antes de instalar (mismo efecto: los datos quedan).
+- Gotcha: dev desktop ahora guarda en `target/app-dev` (lo borra `cargo clean`, igual que
+  `target/server-dev`).
+- 5.6 server: `LEGACY_CONFIG` vuelve a `"sway-server.toml"` (el rename mecánico lo había
+  dejado en `trak-server.toml`, un nombre que nunca existió; es el nombre viejo real). El
+  default del server siempre fue `config.toml` (corrige lo que se le dijo al usuario antes:
+  no hay que renombrar nada a `trak-server.toml`).
+- Tests: core 139, server 11+4+13+7, app 57, `tsc` OK.
+
 ## 2026-10-13 · 5.3 rename Sway → Trak (sin commit)
 
 - Reemplazo mecánico en archivos trackeados (sin `docs/`, `tools/`, `graphify-out/`,

@@ -1,0 +1,22 @@
+# Only the Rust workspace goes into the server image (crates/server/Dockerfile).
+.git
+target
+**/node_modules
+**/target
+docs
+graphify-out
+tools
+notes.txt
+app/src
+app/public
+app/dist
+app/src-tauri/gen
+crates/native-audio/android
+crates/native-audio/ios
+crates/server/trak-data
+# Music never goes into an image.
+*.flac
+*.mp3
+*.wav
+*.aiff
+*.m4a

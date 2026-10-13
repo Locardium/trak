@@ -24,11 +24,12 @@ use trak_server::host::ServerHost;
 use trak_server::serve;
 
 const DEFAULT_CONFIG: &str = "config.toml";
-/// The previous name. A server that's already running still has this one,
-/// and starting with the new name would write a fresh config —with ANOTHER
-/// token— and shut down without ever listening, which under systemd is a
-/// silent outage. It's still accepted, with a warning.
-const LEGACY_CONFIG: &str = "trak-server.toml";
+/// The previous name, from when the app was called Sway. A server that's
+/// already running still has this one, and starting with the new name would
+/// write a fresh config —with ANOTHER token— and shut down without ever
+/// listening, which under systemd is a silent outage. It's still accepted,
+/// with a warning.
+const LEGACY_CONFIG: &str = "sway-server.toml";
 
 fn main() {
     let code = match run() {

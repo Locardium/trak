@@ -1,13 +1,13 @@
 {
   "name": "trak-workspace",
-  "version": "1.0.0-1",
+  "version": "1.0.0-beta.2",
   "private": true,
   "license": "BUSL-1.1",
   "description": "Trak",
   "scripts": {
     "dev": "cd app && pnpm tauri dev",
     "dev:android": "cd app && pnpm tauri android dev --no-watch",
-    "build:win": "cd app && pnpm tauri build --bundles msi",
+    "build:win": "cd app && pnpm tauri build --bundles nsis",
     "build:android": "cd app && pnpm tauri android build --apk",
     "server:build-linux": "cargo zigbuild --release -p trak-server --target x86_64-unknown-linux-musl",
     "server:build-win": "cargo build --release -p trak-server",

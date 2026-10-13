@@ -264,7 +264,10 @@ export const setAutoSyncXml = (enabled: boolean) => invoke<void>('set_auto_sync_
 /// UI state the frontend owns (column layout, and whatever comes next).
 /// Deliberately NOT `localStorage`: that lives in the webview's profile under
 /// AppData, and nothing Trak owns belongs there. These land in the db, in
-/// `<Music>/Trak`, next to the library.
+/// the data folder, next to the library.
+/// Where Trak keeps the db, the library and its caches (desktop: next to the
+/// executable).
+export const dataFolder = () => invoke<string>('data_folder');
 export const getUiSetting = (key: string) => invoke<string | null>('get_ui_setting', { key });
 export const setUiSetting = (key: string, value: string) =>
   invoke<void>('set_ui_setting', { key, value });
