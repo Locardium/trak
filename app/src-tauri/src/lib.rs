@@ -281,6 +281,14 @@ impl engine::Host for AppHost<'_> {
     fn library_changed(&self, force: bool) {
         pairing::emit_library_changed(self.0, force);
     }
+
+    fn confirms_deletions(&self) -> bool {
+        true
+    }
+
+    fn deletions_held(&self) {
+        let _ = self.0.emit("pending-deletes", ());
+    }
 }
 
 #[tauri::command]
@@ -1042,24 +1050,15 @@ fn list_peers(state: State<AppState>) -> Vec<discovery::Peer> {
     state.peers.merged_list(&conn)
 }
 
-/// The "Refresh" button: queries the network again (mDNS) and immediately
-/// rechecks who's reachable, without waiting for the periodic probe.
-/// Re-reading the local list wasn't enough — it was already up to date;
-/// what was missing was asking outward.
-///
-/// mDNS responses arrive via the `peers-changed` event, not in the return
-/// value: the protocol is asynchronous and peers answer when they answer.
-/// The probe itself is immediate.
-///
-/// Note: this does NOT change who's paired. Pairing lives in each device's
-/// `devices` table and is synced by announcing (see `pairing::unpair`), not
-/// by watching the network.
+/// The "Refresh" button: everything that otherwise updates over time, now
+/// (see `pairing::check_now`). Returns when the checks are done, so the
+/// button can say it's working until then; new mDNS answers still arrive
+/// later via `peers-changed`.
 #[tauri::command]
-fn refresh_peers(app: AppHandle) -> Result<(), String> {
-    discovery::refresh(&app).map_err(|e| e.to_string())?;
-    let handle = app.clone();
-    std::thread::spawn(move || discovery::probe_once(&handle));
-    Ok(())
+async fn refresh_peers(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || pairing::check_now(&app))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Pairs with a peer, or if already paired asks it for its library counts.
@@ -1158,6 +1157,37 @@ fn unpair_device(app: AppHandle, uid: String) -> Result<(), String> {
     pairing::unpair(&app, &uid).map_err(|e| e.to_string())?;
     let _ = app.emit("peers-changed", ());
     Ok(())
+}
+
+/// Deletions a peer made while it wasn't linked to this device, held for the
+/// user (2.7, see `merge::pending_deletes`).
+#[tauri::command]
+fn pending_deletes(state: State<AppState>) -> Result<Vec<sway_core::merge::PendingDeletes>, String> {
+    let conn = state.db.lock().unwrap();
+    sway_core::merge::pending_deletes(&conn).map_err(|e| e.to_string())
+}
+
+/// The answer to `pending_deletes` for one device: delete here too, or keep
+/// (and send it back on the next sync).
+#[tauri::command]
+fn resolve_pending_deletes(
+    app: AppHandle,
+    state: State<AppState>,
+    device_uid: String,
+    keep: bool,
+) -> Result<usize, String> {
+    let n = {
+        let conn = state.db.lock().unwrap();
+        sway_core::merge::resolve_pending(&conn, &state.music_dir, &device_uid, keep)
+            .map_err(|e| e.to_string())?
+    };
+    pairing::emit_library_changed(&app, true);
+    autosync::note_change(&app);
+    if !keep {
+        kick_background(&app);
+    }
+    let _ = app.emit("pending-deletes", ());
+    Ok(n)
 }
 
 // ---------------------------------------------------------------------------
@@ -1925,6 +1955,9 @@ pub fn run() {
     }
     builder
         .setup(|app| {
+            // Travels with the protocol version, so a mismatch can say which
+            // version the other side runs (2.8).
+            sway_core::wire::set_app_version(&app.package_info().version.to_string());
             // Everything Sway owns lives next to the user's music, not in
             // AppData: on desktop that's `<Music>/Sway`, so the db travels
             // with the library instead of being orphaned on reinstall. On
@@ -2177,6 +2210,8 @@ pub fn run() {
             report_conditions,
             pair_with_server,
             unpair_device,
+            pending_deletes,
+            resolve_pending_deletes,
             get_scope,
             set_scope_mode,
             set_scope_direction,

@@ -5,6 +5,271 @@
 
 ---
 
+## 2026-10-13 · Commits de la Fase 2
+
+- Dos commits en `master` (pedido del usuario: separar): `c0c8618 chore(desktop): isolate dev
+  builds from the release` (sólo los hunks de "dev de Windows aislado" de `lib.rs`, separados con
+  un patch + blob re-escrito a CRLF: `git apply --cached` dejó las líneas nuevas en LF), y después
+  el commit con toda la Fase 2 (2.1-2.8 + docs). Sin push.
+- `package.json`: entra el `server:dev` = `cd target/server-dev && cargo run -p sway-server --
+  config.toml` (cambio de otro chat no registrado: los datos del server dev viven en
+  `target/server-dev/`, no en la raíz). La devDependency `shx` que venía con ese cambio (sin uso
+  en ningún script) se sacó por decisión del usuario; `pnpm-lock.yaml` restaurado a HEAD.
+- `gen/android/app/build.gradle.kts` restaurado con `git checkout` (ruido del CLI de Tauri).
+
+## 2026-10-13 · 2.6 Doble subida al server del mismo archivo
+
+- Sin commit (va con toda la Fase 2).
+- Causa (ya conocida, 2026-09-29): el server atiende varias sesiones; dos devices que suben el
+  mismo hash a la vez lo mandaban dos veces y escribían el mismo `incoming/<hash>.part` → hash
+  mismatch y reintento.
+- Fix (`crates/core`): `Msg::BlobPushAck { wanted }` (`wire.rs`): tras cada `BlobPush` el
+  receptor (`engine::serve_requests`) contesta antes de cualquier byte: `false` si ya tiene el
+  hash presente (`transfer::path_for_hash`) o si otra sesión lo está recibiendo
+  (`transfer::claim_push`: registro en memoria del proceso por partial, liberado en `Drop`). El
+  que manda (`engine::sync`) lee el ack; si es `false` lo saltea (no cuenta como enviado ni
+  fallido; el próximo sync lo ve ahí). Partial de push propio `incoming/<hash>.push.part`
+  (`push_part_path`): antes compartía `<hash>.part` con los pulls y un push borraba una descarga
+  a medias del mismo archivo. `receive_file` cambió el parámetro `resuming` por `push`.
+- Protocolo: sigue en 2 (todavía sin release); se actualizó sólo la huella de
+  `protocol_fingerprint` (el test la detectó, como tenía que hacer).
+- Test nuevo `engine::tests::a_file_already_coming_in_is_not_pushed_twice`; actualizado
+  `transfer::tests::a_stale_partial_does_not_poison_a_push` (ahora además verifica que el `.part`
+  del pull sobrevive). Verificado: `cargo test -p sway-core -p sway-server`, `cargo check` app.
+  Sin probar con devices reales.
+
+## 2026-10-13 · 2.8 Versión de protocolo
+
+- Sin commit (va con toda la Fase 2).
+- `crates/core/src/wire.rs`: `PROTOCOL = 2`, `MIN_PROTOCOL = 2`, `compat(theirs, their_min) ->
+  Compat {Ok, PeerOlder, WeAreOlder}`, `set_app_version` (OnceLock; la app lo setea en `.setup`
+  con `package_info().version`, el server con `CARGO_PKG_VERSION`). Frame `Version {protocol,
+  minProtocol, app}` que **ambos** lados mandan y después leen, dentro de `Session::finish`
+  (o sea en `connect` y `accept`: ningún llamador puede saltearlo). Fuera de rango →
+  `VersionMismatch {theirs: Option<u32>, their_app, peer_is_older}`. Un build sin versiones
+  (protocolo 1) se detecta así: si conecta él, lo primero que manda es un `Hello` (no parsea como
+  `Version`); si conectamos nosotros, no entiende nuestro frame y corta → `is_disconnect` justo
+  después del handshake = "el otro es viejo" (`theirs: None`). Sesión ok guarda
+  `peer_protocol`/`peer_app` para gatear features futuras.
+- Test `wire::tests::protocol_fingerprint`: serializa una muestra de **cada** `Msg` con todos los
+  campos (struct literals → un campo nuevo no compila sin agregarlo; `match` sin wildcard → una
+  variante nueva tampoco) + el `Version`, blake3, compara con `FINGERPRINT = (PROTOCOL, hash)`.
+  Mensaje: "protocol changed: bump PROTOCOL (and MIN_PROTOCOL if it breaks older peers), then
+  update FINGERPRINT in wire.rs to (N, "...")". Más `compat_says_who_is_behind` y
+  `a_peer_without_versions_is_reported_as_older`. Regla nueva en `CLAUDE.md`.
+- Server (`serve.rs`): log claro por mismatch ("runs a newer Sway (...): update sway-server" /
+  "runs an older Sway (...): update the app on that device"); `main.rs` loguea versión y
+  protocolo al arrancar. README del server: sección "Versions".
+- App: `discovery.rs` — `Peer.proto` reemplazado por `Peer.update: Option<String>` (mensaje
+  listo). mDNS publica `proto` = PROTOCOL y `minproto` = MIN_PROTOCOL; `announced_update` lo
+  compara (un peer viejo publica `proto=1` sin `minproto` → "older"). `Peers.outdated` (mapa por
+  uid, de sesiones fallidas) pisa al anuncio; `is_invalid` ahora es "no se puede sincronizar
+  hasta que alguien actúe" (roto o versión) → watcher/autosync lo dejan en paz; `clear_invalid`
+  limpia los dos (`pairing_ok` lo llama al abrir sesión bien). `update_note(name, platform,
+  peer_is_older, their_app)` arma el texto ("X runs an older Sway Server — update sway-server",
+  "X runs a newer version of Sway — update this app", ...). `pairing.rs session_failed`:
+  `open_session_with` y `connect_inner` marcan outdated + devuelven `PairingBroken(nota)`;
+  `pair_with_server` devuelve la nota como error del diálogo. `autosync.rs` filtra
+  `update.is_none()`. UI (`api.ts`, `Sync.tsx`): `SYNC_PROTO` borrado, badge rojo "Update
+  needed" + la nota en la lista y en la vista del device; sin botones de sync.
+- **Protocolo 2 todavía no salió**: 2.6 (que cambia mensajes) se mete en el mismo protocolo 2,
+  sólo hay que actualizar la huella. Después del primer release con protocolo 2, cualquier
+  cambio sube el número.
+- Verificado: `cargo test -p sway-core -p sway-server`, `cargo test --lib` en app (57),
+  `pnpm tsc --noEmit`. Sin probar entre devices (probar: server viejo vs app nueva → "Update
+  needed" en la app y línea en el log del server).
+
+## 2026-10-13 · 2.7 Re-vincular aplicaba borrados hechos mientras estaban desvinculados
+
+- Sin commit (va con toda la Fase 2).
+- Causa (verificada en código): `merge::changes_for_peer` manda **todos** los tombstones locales
+  en cada sync y `merge::apply` aplicaba **todos** los que llegaban; `devices.paired_at` no se
+  miraba. Al desvincular el celu conserva temas/playlists y la PC sus tombstones → primer sync del
+  vínculo nuevo los aplica. Además un tombstone de track/playlist le ganaba siempre al ítem (sólo
+  las memberships comparaban `added_at`), así que "mantener y reenviar" era imposible.
+- Fix (`crates/core`):
+  - `merge::apply(conn, changes, music_dir, confirm_from: Option<&str>)`. Por tombstone,
+    `target()` mira qué toca acá: `Gone` (no existe → se guarda como siempre), `Newer` (el ítem
+    tiene `updated_at`/`added_at` posterior → el tombstone pierde, NO se guarda), `Present` → si
+    `confirm_from` y `deleted_at < paired_at` de ese peer → fila en tabla local nueva
+    `held_deletes(entity, uid, deleted_at, from_device)` (no se guarda en `tombstones`, no viaja),
+    `Applied.held += 1`; si no, se guarda y aplica como antes.
+  - **Ojo nombre**: la tabla NO puede llamarse `pending_deletes`: `db::migrate` hace
+    `DROP TABLE IF EXISTS pending_deletes` (política vieja de la 6.4) en cada arranque.
+  - Tombstones LWW: `manifest::plan` (pull/push de archivos y conteo de playlists) y
+    `changes_for_peer`/`apply` de playlists sólo respetan el tombstone si `deleted_at >=
+    updated_at`; si el ítem es más nuevo, se borra el tombstone viejo (`apply` para playlists,
+    `transfer::insert_received` para tracks).
+  - `merge::pending_deletes(conn)` (resumen por device, poda filas que ya no aplican) y
+    `merge::resolve_pending(conn, music_dir, device, keep)`: delete = guarda + aplica (papelera);
+    keep = `updated_at`/`added_at` = now → en el próximo sync gana contra el tombstone del otro y
+    vuelve (también vía server o cualquier tercero: no depende de quién pasa el tombstone).
+  - `Host::confirms_deletions()` (default `false`; app `true`; server no tiene UI → aplica como
+    antes) y `Host::deletions_held()` (app emite `pending-deletes`). Llamado en `engine::sync` y en
+    `serve_requests` (MetaPush): los dos lados preguntan.
+  - `core::pairing::forget_device` borra los `held_deletes` de ese device (desvinculado = no se
+    aplica nada; si se vuelve a vincular, se vuelve a preguntar).
+- App: comandos `pending_deletes` / `resolve_pending_deletes` (`lib.rs`; tras resolver:
+  `library-changed`, `autosync::note_change`, y `kick_background` si borró). UI: componente nuevo
+  `components/HeldDeletesDialog.tsx` montado en `App.tsx` junto a `PairingDialog` (aparece con
+  cualquier pantalla abierta; cerrar con la X deja todo retenido y vuelve a preguntar en el
+  próximo `pending-deletes` o al abrir la app). `api.ts`: `pendingDeletes`,
+  `resolvePendingDeletes`.
+- Semántica nueva a tener en cuenta: un tema/playlist editado en un device después de que otro
+  lo borró (sin verse) revive. Coherente con "ante la duda, conservar". Comparación de relojes
+  entre devices distintos (`deleted_at` del que borró vs `paired_at` local): un desfase de
+  minutos sólo importa si se borra justo al vincular.
+- Caso server: si el celu sigue vinculado al server y el server a la PC, los borrados de la PC
+  llegan por el server y se aplican solos (el celu nunca dejó el grupo). Decisión explicada al
+  usuario; no se tocó.
+- Verificado: `cargo test -p sway-core` (tests nuevos
+  `engine::tests::re_linking_holds_deletes_made_while_unlinked_and_keep_sends_them_back` = repro
+  del usuario + keep, y `held_deletes_can_be_confirmed_and_linked_deletes_still_apply`),
+  `cargo test -p sway-server`, `cargo test --lib` en app (57), `pnpm tsc --noEmit`. Sin probar
+  en device.
+- Gotcha: `cargo check` de la app con jobs por defecto se quedó sin memoria (rustc OOM /
+  STATUS_STACK_BUFFER_OVERRUN); con `-j 2` anda.
+
+## 2026-10-13 · Pruebas de Fase 2 + bug nuevo 2.7 + diseño de versiones (2.8)
+
+- Confirmado por el usuario: 2.1, 2.2, 2.3 (token, badge, refresh, re-emparejar en la misma
+  dirección), 2.4 (en uso, sin mirar logcat), 2.5 (marcar A/B y desvincular).
+- Bug nuevo 2.7 (repro y lo esperado en STATUS): re-vincular aplica en el celu los borrados que la
+  PC hizo mientras estaban desvinculados. Sin investigar todavía.
+- Decidido 2.8: versión de protocolo con rango (`PROTOCOL`/`MIN_PROTOCOL`) + test de huella; diseño
+  completo en STATUS. Aclaración del usuario: no busca romper compatibilidad, busca que un update
+  nunca rompa en silencio.
+- Nada de código en esta entrada; todo lo de Fase 2 sigue sin commit.
+
+## 2026-09-29 · Playlists no seleccionadas se reenviaban a devices nuevos (bug reportado)
+
+- Reporte: celu dev (scope selectivo, emparejado antes con la PC release) → desvinculó la PC
+  release, vinculó PC dev + server dev → en la PC dev aparecieron **vacías** las playlists que el
+  celu no tenía seleccionadas (eran de la PC release).
+- Causa: por diseño (doc de `scope.rs`) las playlists/metadata "se replicaban completas": el celu
+  guardaba el catálogo de todo lo que vio y `merge::changes_for_peer` se lo pasaba entero a
+  cualquiera. Vacías porque los temas sólo viajan con archivo.
+- Fix (`crates/core`): `PlaylistEntry.held` (manifest; `scope::mark_held`: modo All → todas; modo
+  Selected → marcadas + descendientes + carpetas ancestro). `changes_for_peer` y los contadores del
+  plan no crean del otro lado playlists/memberships que el emisor no tiene. Tabla local nueva
+  `playlist_sources(playlist_uid, device_uid)` (no se replica): al final de cada sync saliente
+  (`engine::sync`) `scope::note_sources` guarda qué tiene el peer y `scope::prune_orphans` borra
+  **local, sin tombstone** las playlists no-held que ningún device vinculado tiene y sin ningún tema
+  presente acá. `core::pairing::forget_device` borra las fuentes del device; `app pairing.rs
+  forget_device` poda y emite `library-changed`. Primer vínculo (`store_device` de la app): además
+  de modo Selected, marca las playlists propias que ya existían (si no, podrían quedar como
+  no-held y podarse).
+- Test nuevo `engine::tests::a_device_only_hands_on_the_playlists_it_holds` (el escenario del
+  usuario). Verificado: `cargo test -p sway-core -p sway-server`, `cargo test --lib` en app.
+  Sin probar en device.
+- **Datos de prueba ya contaminados**: la PC dev y el server dev ya tienen esas playlists vacías y,
+  como están en modo All, ahora las "tienen" y las seguirían pasando. Para probar limpio: borrar
+  la DB de la PC dev (`<Music>\Sway Dev`) y la del server dev (`data/` en la raíz), re-emparejar.
+- Limitación: sólo el lado que inicia el sync registra fuentes (el pasivo no recibe el manifest
+  del otro). El celu inicia sus syncs (autosync/watcher), así que alcanza.
+- Pendiente aparte (no hecho): server recibiendo el mismo archivo de dos devices a la vez → se sube
+  dos veces y ambos escriben el mismo `<hash>.part` en `incoming` (colisión → hash mismatch y
+  reintento). Propuesto: handshake "¿lo querés?" antes de mandar bytes + `.part` único por push.
+
+## 2026-09-29 · Refresh = chequeo real + quitar/re-emparejar un server que nos soltó
+
+- Reporte del usuario: tocar Refresh no actualizaba el estado ("Needs token" tras cambiar el
+  token), y un server que ya nos soltó no se podía borrar (sólo decía "Needs token", sin botón).
+- Causa: `refresh_peers` sólo re-preguntaba mDNS y hacía un probe TCP que **salteaba** los devices
+  con watcher; nada abría sesión, así que un `NotPaired`/clave cambiada sólo se enteraba cuando el
+  watcher reconectaba. Y `unpair` sólo sacaba de la lista a devices con fila en `devices`.
+- Fix: `lib.rs refresh_peers` ahora es `async` + `spawn_blocking(pairing::check_now)` y devuelve
+  cuando terminó. `pairing.rs check_now`: mDNS + `discovery::probe_all` (sin saltear watchers,
+  probes en paralelo) + `verify_pairing` en paralelo con cada emparejado online (Hello + Bye con
+  `open_session_with` timeout 5 s → registra NotPaired/roto/inalcanzable) + `watchers.wake`.
+  `unpair`: saca de la lista a cualquier device de plataforma server (esté o no en `devices`) y
+  sólo notifica `Unpair` si estaba emparejado. UI (`Sync.tsx`): badge "Needs token" para server no
+  emparejado, botones **Pair again** (precarga host/puerto, foco al token) y **Remove**; el botón
+  Refresh queda en "Scanning…" hasta que vuelve el comando.
+- Verificado: `cargo check`, `cargo test --lib` (57), `pnpm tsc --noEmit`. Sin probar a mano.
+
+## 2026-09-29 · 2.3 extra: cambiar el token del server revoca pairings + fix `pnpm server:dev`
+
+- Reporte del usuario: `pnpm server:dev` creaba un archivo llamado `--config` en la raíz, y
+  cambiar `pair_token` no desconectaba al celu.
+- `--config`: el script pasaba `-- --config config.toml` y el binario toma el path como 1er
+  argumento posicional → escribía un config nuevo en `./--config`. Fix: `package.json`
+  `server:dev` = `cargo run -p sway-server -- config.toml`; `crates/server/src/main.rs
+  config_path` ahora acepta `--config <path>` y sale con el uso ante otro flag. El `--config` que
+  había se renombró a `config.toml` (gitignoreado; `data/` y `music/` en la raíz son de ese
+  server de dev).
+- Token (decisión del usuario: revocar): columna nueva `devices.token_hash` (`crates/core/src/db.rs`,
+  schema + migración). `core/pairing.rs` `set_device_token` / `token_still_valid` (blake3
+  `derive_key`, comparación con `secret_eq`). `crates/server/src/serve.rs`: al emparejar guarda el
+  hash; en cada `Hello` de un device Trusted, si el token no coincide → borra la fila, log
+  `paired with a previous token: unpaired`, contesta `NotPaired` → la app ya olvidaba el device por
+  ese camino (`open_session_with`). **Los devices emparejados antes de esto no tienen hash → quedan
+  revocados al actualizar el server: hay que re-emparejar una vez.** El token se lee al arrancar:
+  cambiarlo requiere reiniciar el server (eso además corta los Watch abiertos).
+- Docs: comentario del config generado (`config.rs`) y `crates/server/README.md`.
+- Verificado: `cargo test -p sway-core -p sway-server` (tests nuevos
+  `a_new_token_revokes_old_pairings` en `crates/server/tests/pairing.rs` y
+  `a_new_token_invalidates_old_pairings` en core). Sin probar a mano.
+
+## 2026-09-29 · Dev de Windows aislado del release (pedido suelto, fuera del plan)
+
+- Sin commit. Archivo: `app/src-tauri/src/lib.rs`.
+- Con `debug_assertions` (o sea `pnpm tauri dev`) en desktop:
+  - Carpeta de datos `<Music>\Sway Dev` en vez de `<Music>\Sway` (const `DATA_DIR` en `lib.rs`):
+    db, `library`, `covers`, `perf.log` y perfil de WebView2 (`webview`, o sea localStorage) todo
+    aparte. Base nueva → uid de dispositivo nuevo.
+  - Identifier `com.locardium.sway.dev` (fn `context()` en `lib.rs`, `config_mut()`): el plugin
+    single-instance arma su mutex con el identifier; sin esto abrir dev con el release abierto
+    sólo enfocaba la ventana del release y salía.
+  - Nombre de dispositivo por defecto `<COMPUTERNAME> Dev` (se setea `SWAY_DEVICE_NAME` antes de
+    abrir la db; sólo aplica cuando la db es nueva o el nombre es placeholder).
+  - Título de ventana "Sway Dev".
+- XML de iTunes NO se aísla (decisión del usuario): dev escribe el mismo
+  `<Music>\iTunes\iTunes Music Library.xml` que el release si tiene auto-sync prendido.
+- Dev y release se siguen viendo por mDNS (mismo service type): aparecen como dos dispositivos
+  distintos y se pueden emparejar entre sí para probar sync. No se aisló a propósito.
+- Verificado: `cargo check` limpio. Sin probar corriendo.
+
+## 2026-09-29 · Fase 2 (2.1-2.4) — estado de conexión, pairing roto, un sync a la vez
+
+- Sin commit (el usuario commitea cuando pruebe). **Protocolo cambiado sin compat**: nuevo
+  `Msg::Busy` en `crates/core/src/wire.rs` y heartbeat del watch 45 s → 25 s → PC, celu y server
+  tienen que ir en la misma versión (el server también: re-deployar `sway-server`).
+- **2.1** (server caído sigue verde): `pairing.rs open_session_with` marca `mark_unreachable` +
+  `peers-changed` cuando falla el connect (el watcher reintenta a los 3 s de un corte, así que un
+  blip no se ve y un server caído se pinta gris en segundos). `watch.rs READ_TIMEOUT` 120 → 60 s y
+  `engine.rs WATCH_HEARTBEAT` 45 → 25 s: un server que muere sin cerrar el socket (corte de luz/red)
+  se detecta en ≤ ~65 s. `Drop for Live` sigue sin marcar offline (a propósito, ver comentario).
+- **2.2** (aparece conectado antes de tiempo): `discovery.rs` — `Peer` tiene `checking: bool` e
+  `invalid: Option<String>`. Un peer de mDNS nace `online: false, checking: true` y se proba al
+  toque (`probe_uid` en un thread); el catch-up (`peer_came_online`) ahora sale sólo de
+  `apply_probe` en la transición a online (antes salía del anuncio mDNS). `upsert` conserva lo que
+  sabía el probe. `spawn_prober` proba en t=0 (antes esperaba 10 s) y emite `peers-changed` al
+  cerrar la ventana de arranque (`DISCOVERY_WINDOW` 6 s, durante la cual los emparejados ausentes
+  salen "checking"). UI: badge "Checking…" en `Sync.tsx` (`peerBadge`).
+- **2.3** (pairing viejo no se olvida): la causa real que se ve en uso es **reinstalar/borrar la
+  DB del server** → uid y clave nuevos; la fila vieja queda con la misma dirección, el probe la
+  pinta verde (el puerto responde) y watcher/autosync reintentan para siempre contra un
+  `KeyMismatch`. Rotar el token NO rompe pairings (el token sólo se chequea en `PairRequest`; los
+  pairings son por clave) — no es bug. Fix: `pair_with_server` borra las filas de otros uids con la
+  misma dirección (`[pair] ... was the previous identity`); `KeyMismatch` o `Reject` al abrir sesión
+  → `Peers::set_invalid` (en memoria, se re-detecta en cada arranque) + `PairingBroken` tipado;
+  watcher (`Outcome::Broken`, nap 1 h, lo despierta `forget_device`) y autosync (`invalid.is_none()`,
+  `peer_came_online`) lo dejan en paz; `sync-done` automático no tira banner. UI: badge rojo
+  "Pairing broken" + motivo + botón "Forget" (usa `unpairDevice`). `forget_device`/`store_device`
+  limpian la marca. El `sync_log` de key-mismatch se escribe una vez por marca, no por reintento.
+- **2.4** (celu recibe del server y de la PC a la vez): `pairing.rs` — `Pairing.active` pasó a
+  `Slots { active, running }` + `Condvar`: **un solo sync corriendo por device, en cualquier
+  dirección**. Saliente (`SyncGuard::acquire`) espera su turno (máx 30 min); entrante
+  (`serve` → `SyncGuard::try_serve`) no espera: contesta `Msg::Busy` y el que llama
+  (`run_sync_blocking`) suelta su slot, espera 3→30 s + jitter y reintenta (se rinde a los 20 min).
+  `autosync::lan_peers` llama `discovery::wait_settled` (espera que la ventana de arranque cierre y
+  no quede nadie "checking", máx 12 s) → el catch-up del server ve a la PC antes de decidir.
+- Verificado: `cargo test -p sway-core -p sway-server` y `cargo test --lib` en `app/src-tauri`
+  (57, con 4 tests nuevos en discovery), `pnpm tsc --noEmit`. **Sin probar en device.**
+- Gotcha: `sed -i` en Git Bash deja CRLF → LF (pasó con `pairing.rs`); usar un script que preserve
+  EOL y chequear `git ls-files --eol` antes de commitear.
+
 ## 2026-09-29 · Limpieza de ramas de git
 
 - Pedido del usuario: entender las ramas, borrar/unir lo que sobre y dejar todo commiteado.

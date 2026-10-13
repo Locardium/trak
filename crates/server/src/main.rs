@@ -72,6 +72,7 @@ fn hold_window_open() {}
 
 fn run() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    sway_core::wire::set_app_version(env!("CARGO_PKG_VERSION"));
 
     let path = config_path();
     let Some(cfg) = Config::load_or_create(&path)? else {
@@ -125,6 +126,12 @@ fn run() -> Result<()> {
     log::info!("[server] {} ({uid})", cfg.name);
     log::info!("[server] public key {}", fingerprint(&pubkey));
     log::info!("[server] files in {}", cfg.music_dir.display());
+    log::info!(
+        "[server] sway-server {}, protocol {} (accepts {}+)",
+        env!("CARGO_PKG_VERSION"),
+        sway_core::wire::PROTOCOL,
+        sway_core::wire::MIN_PROTOCOL
+    );
 
     serve::run(
         Arc::new(serve::Server {
@@ -148,7 +155,19 @@ fn spawn_trash_purge(music_dir: PathBuf, retention_days: u64) {
 fn config_path() -> PathBuf {
     // A single option, and that's why there's no argument-parsing library:
     //   sway-server [config-path]
-    resolve_config(std::env::args().nth(1), Path::new("."))
+    // `--config <path>` is accepted too: it's what anyone types by habit, and
+    // taken as a path it silently wrote a fresh config to a file literally
+    // named `--config`.
+    let mut args = std::env::args().skip(1);
+    let arg = match args.next() {
+        Some(flag) if flag == "--config" => args.next(),
+        Some(flag) if flag.starts_with('-') => {
+            eprintln!("usage: sway-server [config-path]");
+            std::process::exit(2);
+        }
+        other => other,
+    };
+    resolve_config(arg, Path::new("."))
 }
 
 /// Which config file to use. A hand-written path always wins; without one,

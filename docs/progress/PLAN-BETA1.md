@@ -476,6 +476,12 @@ mostrar; agregar un tercer estado `checking` al `Peer` y renderizarlo distinto e
 
 ### 2.3 Pairing viejo no se olvida cuando el código no matchea (notes: bug 3)
 
+> **Corrección 2026-09-29 (al implementar):** el caso que dispara el bug en uso real es reinstalar
+> o borrar la DB del server → uid y clave nuevos. Re-emparejar crea una fila nueva y la vieja
+> (misma dirección) queda para siempre: el probe la pinta verde porque el puerto responde, y el
+> watcher/autosync chocan contra `KeyMismatch` en loop. Rotar el token no invalida pairings y está
+> bien que así sea. Lo implementado está en LOG 2026-09-29 (Fase 2).
+
 Dos caminos, ninguno borra la fila de `devices`:
 - Token inválido: `crates/server/src/serve.rs:178-183` → `pairing.rs:557-559`. Nadie llama a
   `forget_device`. Ojo: el token sólo se chequea en `Msg::PairRequest`; un device ya emparejado

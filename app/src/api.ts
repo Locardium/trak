@@ -271,23 +271,26 @@ export const setUiSetting = (key: string, value: string) =>
 
 // P2P sync on the LAN (Phase 5).
 
-/// Has to match `discovery::PROTO` on the Rust side. A peer announcing a
-/// different version is still listed, but flagged: better not to offer
-/// syncing than to fail halfway through.
-export const SYNC_PROTO = '1';
-
 export interface Peer {
   uid: string;
   name: string;
   platform: string;
-  proto: string;
   addrs: string[];
   port: number;
   lastSeen: number;
   paired: boolean;
-  /// Visible on the network right now. Paired devices are still listed when
-  /// they're not: they stay your devices even if the phone has no wifi.
+  /// Reachable right now. Paired devices are still listed when they're not:
+  /// they stay your devices even if the phone has no wifi.
   online: boolean;
+  /// Nobody has tried to reach it yet (just announced, or the app just
+  /// started): neither online nor offline.
+  checking: boolean;
+  /// The pairing no longer works (its key changed, or it rejects ours); the
+  /// reason to show. Only forgetting and pairing again fixes it.
+  invalid: string | null;
+  /// One of the two has to update before they can sync (protocol out of
+  /// range); the message says who. From the announcement or a failed session.
+  update: string | null;
 }
 
 /// [uid, name] of this device. The uid can't change (tombstones and clocks
@@ -296,8 +299,9 @@ export const deviceIdentity = () => invoke<[string, string]>('device_identity');
 export const setDeviceName = (name: string) => invoke<void>('set_device_name', { name });
 export const listPeers = () => invoke<Peer[]>('list_peers');
 
-/// Sends a fresh mDNS query. Responses arrive via `peers-changed`, not in the
-/// return value: peers answer whenever they answer.
+/// Checks everything now: asks the network again, probes every device and
+/// verifies each pairing. Resolves when the checks are done; late mDNS answers
+/// still arrive via `peers-changed`.
 export const refreshPeers = () => invoke<void>('refresh_peers');
 
 /// Pairs, or if already paired, asks for the other side's counts. Returns
@@ -306,7 +310,24 @@ export const refreshPeers = () => invoke<void>('refresh_peers');
 export const connectPeer = (uid: string) => invoke<void>('connect_peer', { uid });
 export const confirmPairing = (uid: string, accept: boolean) =>
   invoke<boolean>('confirm_pairing', { uid, accept });
+/// Also removes a server that already dropped us ("Needs token") from the list.
 export const unpairDevice = (uid: string) => invoke<void>('unpair_device', { uid });
+
+/// What a device deleted while it wasn't linked to this one and still exists
+/// here: held, not applied, until the user answers. `removals` = tracks taken
+/// out of a playlist (the track itself stays).
+export interface PendingDeletes {
+  deviceUid: string;
+  deviceName: string;
+  tracks: number;
+  playlists: number;
+  removals: number;
+}
+export const pendingDeletes = () => invoke<PendingDeletes[]>('pending_deletes');
+/// `keep`: keep them here and send them back to that device on the next sync.
+/// Otherwise delete them here too (files go to the trash).
+export const resolvePendingDeletes = (deviceUid: string, keep: boolean) =>
+  invoke<number>('resolve_pending_deletes', { deviceUid, keep });
 
 /// Pairs with a file server, which lives outside the local network and so
 /// doesn't show up on its own. This one does answer in the same call — on the

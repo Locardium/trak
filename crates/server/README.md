@@ -87,11 +87,22 @@ pair_token = "..."
   of your devices, with no safety net.
 - `pair_token` is what you type into the app to pair a device. It replaces
   the six-digit code, because there's no screen here to compare it against.
-  **Treat it like a password.** Changing it doesn't unpair what's already
-  paired: the keys are already stored. It can also be passed via the
+  **Treat it like a password.** Changing it (and restarting the server)
+  unpairs every device paired with the old one: on its next connection the
+  app is told it's no longer paired, forgets the server, and has to pair
+  again with the new token. It can also be passed via the
   `SWAY_SERVER_TOKEN` environment variable, which overrides the file's value:
   in a deployment it's best for the secret not to live in a file that could
   end up in a repo.
+
+### Versions
+
+The server and the apps speak a versioned sync protocol. The startup log says
+which one (`protocol 2 (accepts 2+)`). When a device connects with a protocol
+out of range, nothing syncs and both sides say who has to update: the app
+shows **Update needed** on the server, and the server logs a line like
+`... runs a newer Sway (...): update sway-server` or
+`... runs an older Sway (...): update the app on that device`.
 
 ## What it stores
 
@@ -115,16 +126,19 @@ syncs; whoever caused the change isn't notified.
 
 This matters for anything sitting in the middle (a TCP proxy, a NAT): those
 connections stay quiet almost all the time. The server sends a heartbeat
-every 45 seconds to keep them alive, so any inactivity timeout along the way
+every 25 seconds to keep them alive, so any inactivity timeout along the way
 has to be longer than that — the default for Nginx Proxy Manager's Streams is
 10 minutes, which is more than enough.
 
-Forty-five seconds and no more because the deadline that matters isn't the
+Twenty-five seconds and no more because the deadline that matters isn't the
 proxy's: it's the carrier's mobile-data NAT, which drops anything quiet for
 between 30 and 60 seconds. The connection dropping anyway isn't a big deal
 —the device reconnects saying which revision it knew about and the server
 tells it whether it missed something—, but each drop leaves the server
-talking to a dead connection for a while until its heartbeat fails.
+talking to a dead connection for a while until its heartbeat fails. It's
+also what lets the app notice a server that vanished without closing the
+connection: it gives up after 60 seconds without a heartbeat and shows the
+server as unreachable.
 
 A server older than this cuts the connection when it receives the wait
 request. The app detects that after three attempts and falls back to

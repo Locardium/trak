@@ -17,7 +17,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use sway_core::engine::{self, is_disconnect};
 use sway_core::pairing::{self as pair, Known};
-use sway_core::wire::{Msg, Session};
+use sway_core::wire::{Msg, Session, VersionMismatch, MIN_PROTOCOL, PROTOCOL};
 use sway_core::{db, engine::Host};
 
 pub struct Server {
@@ -45,7 +45,23 @@ pub fn run(server: Arc<Server>, listener: TcpListener) -> Result<()> {
                 // Connecting and hanging up without saying anything is what
                 // the app's reachability probe does: expected traffic, not
                 // an error.
-                if is_disconnect(&e) {
+                if let Some(v) = e.downcast_ref::<VersionMismatch>() {
+                    // Said plainly: from the other side, all the user sees is
+                    // "Update needed".
+                    let theirs = v.theirs.map_or("none".to_string(), |p| p.to_string());
+                    if v.peer_is_older {
+                        log::warn!(
+                            "[server] {peer} runs an older Sway (protocol {theirs}, this server \
+                             {PROTOCOL}, min {MIN_PROTOCOL}): update the app on that device"
+                        );
+                    } else {
+                        log::warn!(
+                            "[server] {peer} runs a newer Sway (app {}, protocol {theirs}; this \
+                             server {PROTOCOL}): update sway-server",
+                            v.their_app
+                        );
+                    }
+                } else if is_disconnect(&e) {
                     log::debug!("[server] {peer} disconnected without saying anything");
                 } else {
                     log::warn!("[server] connection with {peer} ended: {e}");
@@ -102,6 +118,19 @@ fn serve(server: &Server, stream: TcpStream) -> Result<()> {
                     let _ = sess.send(&Msg::NotPaired);
                     return Ok(());
                 }
+            }
+            // The key proves who it is; the token, that it's still welcome.
+            // Changing `pair_token` in the config revokes every pairing made
+            // with the old one, like changing a password: the device hears
+            // `NotPaired`, forgets the server, and has to pair again.
+            let welcome = server
+                .host
+                .with_db(|conn| Ok(pair::token_still_valid(conn, &uid, &server.token)))?;
+            if !welcome {
+                server.host.with_db(|conn| pair::forget_device(conn, &uid))?;
+                log::info!("[server] {name} was paired with a previous token: unpaired");
+                let _ = sess.send(&Msg::NotPaired);
+                return Ok(());
             }
             hello_back(server, &mut sess)?;
             report_clock(&name, clock_ms);
@@ -198,9 +227,10 @@ fn pair_device(
         other => return Err(anyhow!("expected PairAck, got {other:?}")),
     }
 
-    server
-        .host
-        .with_db(|conn| pair::store_device(conn, uid, name, platform, &sess.peer_pubkey))?;
+    server.host.with_db(|conn| {
+        pair::store_device(conn, uid, name, platform, &sess.peer_pubkey)?;
+        pair::set_device_token(conn, uid, &server.token)
+    })?;
     log::info!("[server] {name} ({platform}) paired");
 
     // Mutual introduction, just like between two devices: both send first

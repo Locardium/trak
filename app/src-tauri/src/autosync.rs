@@ -156,6 +156,11 @@ fn restore_pending(handle: &AppHandle) {
 /// filtered out here so neither caller has to remember to.
 pub fn peer_came_online(handle: &AppHandle, uid: &str) {
     let state = handle.state::<AppState>();
+    // Reachable, but its pairing is broken (Fase 2.3): a sync would only be
+    // one more rejection.
+    if state.peers.is_invalid(uid) {
+        return;
+    }
     let platform: String = {
         let guard = state.db.lock();
         let Ok(conn) = guard else { return };
@@ -211,7 +216,12 @@ pub fn peer_came_online(handle: &AppHandle, uid: &str) {
 }
 
 /// The paired and available devices that aren't a server.
+///
+/// Waits for discovery to settle first (a few seconds at most, only right
+/// after startup or while a peer is still being probed): the answer decides
+/// whether the server waits for the LAN, and asking too early said "nobody".
 pub(crate) fn lan_peers(handle: &AppHandle) -> Vec<String> {
+    crate::discovery::wait_settled(handle);
     let state = handle.state::<AppState>();
     let guard = state.db.lock();
     let Ok(conn) = guard else { return Vec::new() };
@@ -219,7 +229,8 @@ pub(crate) fn lan_peers(handle: &AppHandle) -> Vec<String> {
         .peers
         .merged_list(&conn)
         .into_iter()
-        .filter(|p| p.paired && p.online && p.platform != sway_core::pairing::PLATFORM_SERVER)
+        .filter(|p| p.paired && p.online && p.invalid.is_none() && p.update.is_none())
+        .filter(|p| p.platform != sway_core::pairing::PLATFORM_SERVER)
         .map(|p| p.uid)
         .collect()
 }
@@ -259,7 +270,7 @@ pub fn spawn(handle: AppHandle) {
                     .peers
                     .merged_list(&conn)
                     .into_iter()
-                    .filter(|p| p.paired && p.online)
+                    .filter(|p| p.paired && p.online && p.invalid.is_none() && p.update.is_none())
                     .map(|p| (p.uid, p.platform))
                     .collect()
             };

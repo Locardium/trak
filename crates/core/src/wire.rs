@@ -18,6 +18,97 @@ use std::net::TcpStream;
 
 const PARAMS: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 
+// ---------------------------------------------------------------------------
+// Protocol version (Beta 1 · 2.8)
+// ---------------------------------------------------------------------------
+
+/// Version of what travels over the channel: the messages, their fields, and
+/// the order they go in.
+///
+/// **Any change to the protocol bumps this**, so an update never breaks in
+/// silence. Additive changes a previous version still understands (a field
+/// with `serde(default)`, a message only sent to a peer that knows it) bump
+/// only `PROTOCOL`; the newer side gates them with `peer_protocol >= N`.
+/// Breaking ones also raise `MIN_PROTOCOL` to the new value. The test
+/// `tests::protocol_fingerprint` fails when a message changes without a bump.
+pub const PROTOCOL: u32 = 2;
+
+/// The oldest protocol this build can still sync with.
+pub const MIN_PROTOCOL: u32 = 2;
+
+/// First frame each side sends after the Noise handshake, before any `Msg`.
+/// Not a `Msg` on purpose: with different protocols even `Hello` may not
+/// parse, and this has to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Version {
+    protocol: u32,
+    min_protocol: u32,
+    /// The app's own version, only for telling the user what to update.
+    app: String,
+}
+
+static APP_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The version of the app/server this runs in, sent with the protocol (for
+/// messages like "the server runs 1.2.0"). Set once at startup.
+pub fn set_app_version(version: &str) {
+    let _ = APP_VERSION.set(version.to_string());
+}
+
+/// Who has to update when two protocols can't talk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compat {
+    Ok,
+    PeerOlder,
+    WeAreOlder,
+}
+
+/// Whether a peer speaking `theirs` (and accepting down to `their_min`) can
+/// sync with this build.
+pub fn compat(theirs: u32, their_min: u32) -> Compat {
+    if theirs < MIN_PROTOCOL {
+        Compat::PeerOlder
+    } else if PROTOCOL < their_min {
+        Compat::WeAreOlder
+    } else {
+        Compat::Ok
+    }
+}
+
+/// The two sides can't sync: one of them needs updating. Typed so the app
+/// can show "Update needed" instead of retrying forever.
+#[derive(Debug, Clone)]
+pub struct VersionMismatch {
+    /// The peer's protocol; `None` for a build from before versions existed
+    /// (it hung up on, or didn't understand, the version frame).
+    pub theirs: Option<u32>,
+    pub their_app: String,
+    pub peer_is_older: bool,
+}
+
+impl std::fmt::Display for VersionMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let theirs = match self.theirs {
+            Some(p) => format!("protocol {p}"),
+            None => "no protocol version".into(),
+        };
+        let app = if self.their_app.is_empty() {
+            String::new()
+        } else {
+            format!(", app {}", self.their_app)
+        };
+        let who = if self.peer_is_older { "the other device" } else { "this device" };
+        write!(
+            f,
+            "incompatible versions: the other device speaks {theirs}{app}, this one {PROTOCOL} \
+             (min {MIN_PROTOCOL}); {who} needs updating"
+        )
+    }
+}
+
+impl std::error::Error for VersionMismatch {}
+
 /// Noise's cap for a single message (64 KiB), minus the 16-byte tag.
 const MAX_NOISE_PAYLOAD: usize = 65535 - 16;
 /// Sanity bound on an incoming logical message: keeps a hostile peer (or a
@@ -92,6 +183,11 @@ pub enum Msg {
     /// a peer it doesn't know; the caller uses it to realize it was unpaired
     /// from the other side.
     NotPaired,
+    /// "I'm already syncing with someone else, call me later." Sent instead
+    /// of `Hello` by a device with a screen: it runs a single sync at a time
+    /// (Fase 2.4), so a phone doesn't pull from the server and take a push
+    /// from the PC at once. Not a rejection — the caller retries.
+    Busy,
     /// Request and response for the library inventory (Phase 5.3).
     /// `gzip` says whether the requester knows how to read a compressed
     /// inventory.
@@ -141,8 +237,9 @@ pub enum Msg {
     BlobStart { size: u64 },
     /// End of the transfer; `hash` is that of the COMPLETE file, to verify.
     BlobEnd { hash: String },
-    /// Push in the other direction: "take this file". Followed by the raw
-    /// payloads and a BlobEnd, same as above.
+    /// Push in the other direction: "take this file". The other side answers
+    /// `BlobPushAck`; only if it wants it come the raw payloads and a
+    /// BlobEnd, same as above.
     BlobPush {
         track_uid: String,
         hash: String,
@@ -162,6 +259,9 @@ pub enum Msg {
     /// The other side can't serve what was requested (doesn't have it, can't
     /// read it).
     BlobError { reason: String },
+    /// Answer to `BlobPush`, before any byte (2.6): `false` when the file is
+    /// already here or another session is receiving it right now.
+    BlobPushAck { wanted: bool },
     /// Metadata, playlists, folders and memberships the other side is
     /// missing (Phase 5.5). Sent after the files: a membership for a track
     /// that hasn't arrived yet is ignored, so it's better if it already
@@ -248,6 +348,11 @@ pub struct Session {
     pub peer_pubkey: Vec<u8>,
     /// Code to show on screen. Both sides compute the same one.
     pub code: String,
+    /// The peer's protocol, for gating features newer than `MIN_PROTOCOL`.
+    /// Always compatible: a session with an incompatible peer isn't returned.
+    pub peer_protocol: u32,
+    /// The peer's app version, as it declared it.
+    pub peer_app: String,
 }
 
 impl Session {
@@ -296,12 +401,59 @@ impl Session {
             .get_remote_static()
             .ok_or_else(|| anyhow!("the peer did not send its static key"))?
             .to_vec();
-        Ok(Self {
+        let mut sess = Self {
             stream,
             noise: hs.into_transport_mode()?,
             peer_pubkey,
             code,
-        })
+            peer_protocol: 0,
+            peer_app: String::new(),
+        };
+        sess.exchange_versions()?;
+        Ok(sess)
+    }
+
+    /// Both sides send their version first and then read the other's, so
+    /// neither waits on the other. Done here and not by each caller: nothing
+    /// can skip it.
+    fn exchange_versions(&mut self) -> Result<()> {
+        let mine = Version {
+            protocol: PROTOCOL,
+            min_protocol: MIN_PROTOCOL,
+            app: APP_VERSION.get().cloned().unwrap_or_default(),
+        };
+        self.send_bytes(&serde_json::to_vec(&mine)?)?;
+        let theirs: Version = match self.recv_bytes() {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(v) => v,
+                // Something else first (a `Hello`): a build from before
+                // versions existed.
+                Err(_) => return Err(Self::too_old().into()),
+            },
+            // A build from before versions can't parse our version frame and
+            // hangs up right after the handshake.
+            Err(e) if crate::engine::is_disconnect(&e) => return Err(Self::too_old().into()),
+            Err(e) => return Err(e),
+        };
+        self.peer_protocol = theirs.protocol;
+        self.peer_app = theirs.app.clone();
+        match compat(theirs.protocol, theirs.min_protocol) {
+            Compat::Ok => Ok(()),
+            c => Err(VersionMismatch {
+                theirs: Some(theirs.protocol),
+                their_app: theirs.app,
+                peer_is_older: c == Compat::PeerOlder,
+            }
+            .into()),
+        }
+    }
+
+    fn too_old() -> VersionMismatch {
+        VersionMismatch {
+            theirs: None,
+            their_app: String::new(),
+            peer_is_older: true,
+        }
     }
 
     pub fn send(&mut self, msg: &Msg) -> Result<()> {
@@ -490,6 +642,256 @@ mod tests {
 
         assert!(msg.contains("web server"), "useless message: {msg}");
         assert!(msg.contains("HTTP"), "useless message: {msg}");
+    }
+
+    /// Every message, every nested type, with every field set. Struct
+    /// literals on purpose: a new field doesn't compile until it's added
+    /// here, and then it changes the fingerprint.
+    fn every_message() -> Vec<Msg> {
+        use crate::manifest::*;
+        use crate::merge::{Applied, Changes};
+        let track = TrackEntry {
+            uid: "t".into(),
+            hash: Some("h".into()),
+            size: 1,
+            filename: "f.flac".into(),
+            title: "T".into(),
+            artist: "A".into(),
+            album: "B".into(),
+            genre: "G".into(),
+            duration_ms: 2,
+            bpm: Some(3),
+            updated_at: 4,
+            present: true,
+        };
+        let playlist = PlaylistEntry {
+            uid: "p".into(),
+            name: "P".into(),
+            kind: "playlist".into(),
+            parent_uid: Some("f".into()),
+            rank: "a".into(),
+            updated_at: 5,
+            held: true,
+        };
+        let membership = Membership {
+            playlist_uid: "p".into(),
+            track_uid: "t".into(),
+            rank: "a".into(),
+            added_at: 6,
+        };
+        let tombstone = Tombstone {
+            entity: "track".into(),
+            uid: "x".into(),
+            deleted_at: 7,
+        };
+        let scope = ScopeEntry {
+            device_uid: "d".into(),
+            playlist_uid: "p".into(),
+            selected: true,
+            updated_at: 8,
+        };
+        let device_sync = DeviceSync {
+            device_uid: "d".into(),
+            mode: "selected".into(),
+            direction: "both".into(),
+            updated_at: 9,
+        };
+        let manifest = Manifest {
+            device_uid: "d".into(),
+            tracks: vec![track.clone()],
+            playlists: vec![playlist.clone()],
+            memberships: vec![membership.clone()],
+            tombstones: vec![tombstone.clone()],
+            scopes: vec![scope.clone()],
+            device_sync: vec![device_sync.clone()],
+        };
+        let changes = Changes {
+            tracks: vec![track],
+            playlists: vec![playlist],
+            memberships: vec![membership],
+            tombstones: vec![tombstone],
+            scopes: vec![scope],
+            device_sync: vec![device_sync],
+        };
+        let applied = Applied {
+            tracks: 1,
+            playlists: 2,
+            memberships: 3,
+            deleted: 4,
+            scope: 5,
+            held: 6,
+        };
+        let mark = Mark { epoch: 1, rev: 2 };
+        let all = vec![
+            Msg::PairRequest {
+                uid: "u".into(),
+                name: "n".into(),
+                platform: "p".into(),
+                token: Some("t".into()),
+            },
+            Msg::PairResponse { accepted: true },
+            Msg::PairAck { accepted: true },
+            Msg::Hello {
+                uid: "u".into(),
+                name: "n".into(),
+                platform: "p".into(),
+                tracks: 1,
+                playlists: 2,
+                clock_ms: 3,
+            },
+            Msg::Reject { reason: "r".into() },
+            Msg::Unpair { uid: "u".into() },
+            Msg::NotPaired,
+            Msg::Busy,
+            Msg::ManifestReq { gzip: true },
+            Msg::ManifestData { manifest: Box::new(manifest) },
+            Msg::ManifestGz { data: vec![1, 2] },
+            Msg::BlobReq {
+                hash: "h".into(),
+                offset: 1,
+                index: 2,
+                of: 3,
+            },
+            Msg::BlobStart { size: 1 },
+            Msg::BlobEnd { hash: "h".into() },
+            Msg::BlobPush {
+                track_uid: "t".into(),
+                hash: "h".into(),
+                filename: "f".into(),
+                size: 1,
+                title: "T".into(),
+                artist: "A".into(),
+                album: "B".into(),
+                genre: "G".into(),
+                duration_ms: 2,
+                bpm: Some(3),
+                updated_at: 4,
+                index: 5,
+                of: 6,
+            },
+            Msg::BlobError { reason: "r".into() },
+            Msg::BlobPushAck { wanted: true },
+            Msg::MetaPush { changes: Box::new(changes) },
+            Msg::MetaAck { applied },
+            Msg::Watch { since: Some(mark) },
+            Msg::Changed { mark },
+            Msg::Ping { mark },
+            Msg::Bye,
+        ];
+        // No wildcard: a new variant doesn't compile until it has a sample
+        // above (and a line here).
+        for m in &all {
+            match m {
+                Msg::PairRequest { .. }
+                | Msg::PairResponse { .. }
+                | Msg::PairAck { .. }
+                | Msg::Hello { .. }
+                | Msg::Reject { .. }
+                | Msg::Unpair { .. }
+                | Msg::NotPaired
+                | Msg::Busy
+                | Msg::ManifestReq { .. }
+                | Msg::ManifestData { .. }
+                | Msg::ManifestGz { .. }
+                | Msg::BlobReq { .. }
+                | Msg::BlobStart { .. }
+                | Msg::BlobEnd { .. }
+                | Msg::BlobPush { .. }
+                | Msg::BlobError { .. }
+                | Msg::BlobPushAck { .. }
+                | Msg::MetaPush { .. }
+                | Msg::MetaAck { .. }
+                | Msg::Watch { .. }
+                | Msg::Changed { .. }
+                | Msg::Ping { .. }
+                | Msg::Bye => {}
+            }
+        }
+        all
+    }
+
+    /// The fingerprint of everything that travels, and the protocol it
+    /// belongs to. When it changes, the protocol has to change with it.
+    const FINGERPRINT: (u32, &str) =
+        (2, "f10c24bafbdd1179c9f24b70700fdb130dd040792efa8090dfabb1ef843c4951");
+
+    /// Changing a message without bumping the protocol breaks an update in
+    /// silence: an old peer fails to parse, or worse, parses something else.
+    /// This makes the change loud.
+    #[test]
+    fn protocol_fingerprint() {
+        let mut all = String::new();
+        for m in every_message() {
+            all.push_str(&serde_json::to_string(&m).unwrap());
+            all.push('\n');
+        }
+        let version = Version {
+            protocol: 0,
+            min_protocol: 0,
+            app: String::new(),
+        };
+        all.push_str(&serde_json::to_string(&version).unwrap());
+        let now = blake3::hash(all.as_bytes()).to_hex().to_string();
+        assert!(
+            FINGERPRINT == (PROTOCOL, now.as_str()),
+            "protocol changed: bump PROTOCOL (and MIN_PROTOCOL if it breaks older peers), \
+             then update FINGERPRINT in wire.rs to ({PROTOCOL}, \"{now}\")"
+        );
+    }
+
+    #[test]
+    fn compat_says_who_is_behind() {
+        assert_eq!(compat(PROTOCOL, MIN_PROTOCOL), Compat::Ok);
+        assert_eq!(compat(MIN_PROTOCOL - 1, 0), Compat::PeerOlder);
+        assert_eq!(compat(PROTOCOL + 5, PROTOCOL + 1), Compat::WeAreOlder);
+        // Newer, but still accepting us: sync with the older one's features.
+        assert_eq!(compat(PROTOCOL + 1, MIN_PROTOCOL), Compat::Ok);
+    }
+
+    /// A build from before versions speaks first with a `Hello` (it doesn't
+    /// send a version frame): the session fails as "the other one is older",
+    /// not as a parse error.
+    #[test]
+    fn a_peer_without_versions_is_reported_as_older() {
+        let (a_priv, _) = generate_keypair().unwrap();
+        let (b_priv, _) = generate_keypair().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // The old caller: plain Noise handshake, then a `Hello` right away.
+        let old = std::thread::spawn(move || {
+            let stream = TcpStream::connect(addr).unwrap();
+            let mut hs = Builder::new(PARAMS.parse().unwrap())
+                .local_private_key(&a_priv)
+                .unwrap()
+                .build_initiator()
+                .unwrap();
+            let mut buf = vec![0u8; 65535];
+            let n = hs.write_message(&[], &mut buf).unwrap();
+            write_frame(&stream, &buf[..n]).unwrap();
+            let msg = read_frame(&stream).unwrap();
+            hs.read_message(&msg, &mut buf).unwrap();
+            let n = hs.write_message(&[], &mut buf).unwrap();
+            write_frame(&stream, &buf[..n]).unwrap();
+            let mut s = Session {
+                stream,
+                noise: hs.into_transport_mode().unwrap(),
+                peer_pubkey: vec![],
+                code: String::new(),
+                peer_protocol: 0,
+                peer_app: String::new(),
+            };
+            let _ = s.send(&Msg::Bye);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let err = match Session::accept(stream, &b_priv) {
+            Err(e) => e,
+            Ok(_) => panic!("an old peer can't get a session"),
+        };
+        old.join().unwrap();
+        let mismatch = err.downcast_ref::<VersionMismatch>().expect("typed error");
+        assert!(mismatch.peer_is_older);
+        assert_eq!(mismatch.theirs, None);
     }
 
     /// Sets up both ends of a session over loopback.

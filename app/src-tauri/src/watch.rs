@@ -22,7 +22,7 @@
 //! skips that device (see `discovery::probe_once`): the connection itself is
 //! proof that it's reachable, and a better one than a connect, because it
 //! drops the instant it stops being reachable. The only thing that travels at
-//! rest is a heartbeat every 45 seconds.
+//! rest is a heartbeat every 25 seconds.
 //!
 //! **On a phone this connection drops all the time, and that's fine.** It
 //! switches from wifi to data, the carrier's NAT cuts it, Doze kills it with
@@ -44,12 +44,14 @@ use tauri::{AppHandle, Emitter, Manager};
 
 /// How long to wait for a heartbeat before declaring the connection dead.
 ///
-/// A bit over two heartbeats (`engine::WATCH_HEARTBEAT` is 45 seconds):
+/// A bit over two heartbeats (`engine::WATCH_HEARTBEAT` is 25 seconds):
 /// missing one alone can't cost a reconnection, but you also can't spend a
 /// long while believing there's someone on the other end. It's also the
-/// ceiling on how long a downed device can keep showing up green, because
-/// while this connection lasts the poll doesn't touch it.
-const READ_TIMEOUT: Duration = Duration::from_secs(120);
+/// ceiling on how long a server that died without closing the connection
+/// keeps showing up green, because while this connection lasts the poll
+/// doesn't touch it. It was 120 s, and a server that went away looked
+/// connected for two minutes (Fase 2.1).
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Wait after a drop, and its ceiling. Doubles on every failed attempt: a
 /// server that's off doesn't deserve an attempt every fifteen seconds all
@@ -268,6 +270,8 @@ enum Outcome {
     /// soon as it's back, the other never fixes itself. Confusing them left
     /// devices not watching for an hour every time the server restarted.
     Unreachable,
+    /// Answered, but the pairing doesn't work anymore (Fase 2.3).
+    Broken,
 }
 
 /// Keeps one watcher per paired server.
@@ -347,6 +351,13 @@ fn watcher(handle: AppHandle, uid: String) {
     // trying to tell apart when sync "isn't working."
     let mut paused: Option<String> = None;
     while still_paired(&handle, &uid) {
+        // A broken pairing (Fase 2.3) isn't fixed by retrying: every attempt
+        // would be one more rejection. Forgetting the device wakes this up
+        // and ends the loop; pairing it again clears the mark.
+        if handle.state::<AppState>().peers.is_invalid(&uid) {
+            nap(&handle, &uid, UNSUPPORTED_RETRY);
+            continue;
+        }
         if let Some(reason) = on_hold(&handle) {
             if paused.as_deref() != Some(reason.as_str()) {
                 log::info!("[watch] not watching {uid} for now: {reason}");
@@ -411,6 +422,11 @@ fn watcher(handle: AppHandle, uid: String) {
                 let d = retry.unreachable();
                 nap(&handle, &uid, d);
             }
+            // Already marked; the top of the loop takes it from here.
+            Ok(Outcome::Broken) => {
+                log::info!("[watch] pairing with {uid} is broken: not watching it");
+                since = None;
+            }
             Err(e) => {
                 log::debug!("[watch] connection with {uid} ended: {e}");
                 match retry.dropped(started.elapsed()) {
@@ -439,6 +455,9 @@ fn watcher(handle: AppHandle, uid: String) {
 /// The local network first, for the same reason as in `autosync`: pulling
 /// over the LAN what the server would otherwise have to send is the
 /// difference between one second and several minutes over the internet.
+/// `lan_peers` waits for discovery to settle first: right after startup it
+/// found nobody yet, and the phone pulled from the server while the PC was
+/// about to show up (Fase 2.4).
 fn catch_up(handle: &AppHandle, uid: &str) {
     let lan = crate::autosync::lan_peers(handle);
     crate::pairing::wait_until_idle(handle, &lan, crate::autosync::LAN_FIRST_MAX_WAIT);
@@ -463,6 +482,8 @@ fn wait_for_news(
     // exist.
     let mut sess = match crate::pairing::open_session_with(handle, uid, READ_TIMEOUT) {
         Ok(sess) => sess,
+        Err(e) if e.is::<crate::pairing::PairingBroken>() => return Ok(Outcome::Broken),
+        // Not reaching it already turned it grey (`open_session_with`).
         Err(e) => {
             log::debug!("[watch] could not reach {uid}: {e}");
             return Ok(Outcome::Unreachable);
@@ -520,8 +541,9 @@ impl Drop for Live {
             live.remove(&self.1);
         }
         // Whether the device is down isn't decided here: the drop can be a
-        // one-second blip. The poll picks it back up as soon as it leaves
-        // the list and tells the truth within fifteen seconds.
+        // one-second blip. The watcher reconnects within `RETRY_AFTER_DROP`,
+        // and if nobody answers then, that attempt turns it grey — so a
+        // blip never shows, and a server that went away does, in seconds.
     }
 }
 
@@ -538,7 +560,7 @@ fn stored_mark(handle: &AppHandle, uid: &str) -> Option<Mark> {
     sway_core::pairing::watch_mark(&conn, uid)
 }
 
-/// Saves it. Only when it changed: the heartbeat arrives every 45 seconds
+/// Saves it. Only when it changed: the heartbeat arrives every 25 seconds
 /// and almost always carries the same mark, and it's not worth taking the
 /// database lock —the same one the screen needs— to write what was already
 /// there.

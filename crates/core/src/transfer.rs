@@ -43,6 +43,41 @@ fn part_path(music_dir: &Path, hash: &str) -> PathBuf {
     incoming_dir(music_dir).join(format!("{hash}.part"))
 }
 
+/// A push has its own partial: it always starts from scratch, and sharing the
+/// pull's `<hash>.part` meant throwing away a half-done download of the same
+/// file (or two writers on one file).
+fn push_part_path(music_dir: &Path, hash: &str) -> PathBuf {
+    incoming_dir(music_dir).join(format!("{hash}.push.part"))
+}
+
+/// Pushes being received right now in this process, by partial path.
+///
+/// The server takes several devices at once, and two of them can push the
+/// same file at the same time (2.6): it went up twice, both wrote the same
+/// partial, and the hash check failed. The second one is now told "not
+/// wanted" (`Msg::BlobPushAck`) and skips it; the next sync sees it there.
+static RECEIVING: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// The right to receive one pushed file. Released on drop, whatever happens.
+pub struct PushClaim(PathBuf);
+
+impl Drop for PushClaim {
+    fn drop(&mut self) {
+        RECEIVING.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| p != &self.0);
+    }
+}
+
+/// `None` if this file is already coming in through another session.
+pub fn claim_push(music_dir: &Path, hash: &str) -> Option<PushClaim> {
+    let part = push_part_path(music_dir, hash);
+    let mut busy = RECEIVING.lock().unwrap_or_else(|e| e.into_inner());
+    if busy.contains(&part) {
+        return None;
+    }
+    busy.push(part.clone());
+    Some(PushClaim(part))
+}
+
 /// How much of this file has already been downloaded.
 fn resume_offset(music_dir: &Path, hash: &str) -> u64 {
     std::fs::metadata(part_path(music_dir, hash))
@@ -110,25 +145,25 @@ pub struct Received {
 /// brought in: if it imported it, it would create a row with a new uid and
 /// overwrite the metadata synced from the file's tags.
 ///
-/// `resuming` says whether what's coming continues a `.part` that already
-/// existed. **It's only true when this side requested the file with an
-/// offset** (`pull_file`). In a push the other side sends from scratch without
-/// knowing what we have, so an old `.part` with the same hash has to be
-/// discarded: stacking the whole file on top of it gives a longer file, a
-/// different hash, and an entire transfer wasted that repeats on every sync.
+/// `push`: the other side sends on its own, from scratch, without knowing
+/// what we have. It goes to its own partial (`push_part_path`), and an old
+/// one is discarded: stacking the whole file on top of it gives a longer
+/// file, a different hash, and an entire transfer wasted that repeats on
+/// every sync. The caller holds a `claim_push` for it. A pull continues its
+/// `.part` instead: the request carried that offset.
 pub fn receive_file(
     sess: &mut Session,
     music_dir: &Path,
     hash: &str,
     filename: &str,
-    resuming: bool,
+    push: bool,
     progress: &mut dyn FnMut(u64, u64),
     mark_expected: &mut dyn FnMut(&Path),
 ) -> Result<Received> {
     let incoming = incoming_dir(music_dir);
     std::fs::create_dir_all(&incoming)?;
-    let part = part_path(music_dir, hash);
-    if !resuming && part.exists() {
+    let part = if push { push_part_path(music_dir, hash) } else { part_path(music_dir, hash) };
+    if push && part.exists() {
         log::debug!("[sync] discarding a stale partial of {hash}");
         let _ = std::fs::remove_file(&part);
     }
@@ -215,7 +250,7 @@ pub fn pull_file(
         index,
         of,
     })?;
-    receive_file(sess, music_dir, hash, filename, offset > 0, progress, mark_expected)
+    receive_file(sess, music_dir, hash, filename, false, progress, mark_expected)
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +278,12 @@ pub fn insert_received(
     bpm: Option<i64>,
     updated_at: i64,
 ) -> rusqlite::Result<i64> {
+    // Touched on the other side after it was deleted here (kept there, 2.7):
+    // the delete lost and its tombstone is stale.
+    conn.execute(
+        "DELETE FROM tombstones WHERE entity = 'track' AND uid = ?1 AND deleted_at < ?2",
+        rusqlite::params![uid, updated_at],
+    )?;
     let (_, mtime) = crate::hashing::file_stamp(dest).unwrap_or((0, 0));
     let rel = dest
         .file_name()
@@ -429,7 +470,7 @@ mod tests {
             &dst_dir,
             &hash,
             "track.flac",
-            false,
+            true,
             &mut |_, _| {},
             &mut |_| {},
         )
@@ -437,6 +478,8 @@ mod tests {
         sender.join().unwrap();
 
         assert_eq!(std::fs::read(&got.path).unwrap(), data);
+        // And the half-done download is still there to resume.
+        assert_eq!(std::fs::read(part_path(&dst_dir, &hash)).unwrap(), &data[..1000]);
         std::fs::remove_dir_all(&src_dir).ok();
         std::fs::remove_dir_all(&dst_dir).ok();
     }

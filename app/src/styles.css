@@ -1021,6 +1021,7 @@ table.tracks th.col-drop-after { box-shadow: inset -2px 0 0 var(--accent); }
   border: 1px solid var(--line); color: var(--muted);
 }
 .peer-badge.ok { color: var(--accent); border-color: color-mix(in oklch, var(--accent) 55%, transparent); }
+.peer-badge.bad { color: var(--danger); border-color: color-mix(in oklch, var(--danger) 55%, transparent); background: var(--danger-soft); }
 
 /* Sync dry run */
 .peer { flex-wrap: wrap; }

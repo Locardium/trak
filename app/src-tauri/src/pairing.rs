@@ -26,7 +26,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -71,23 +71,84 @@ use sway_core::pairing::{platform, Known, CONNECT_TIMEOUT, IO_TIMEOUT};
 #[derive(Default)]
 pub struct Pairing {
     pending: Mutex<HashMap<String, (u64, Sender<bool>)>>,
-    /// Syncs in progress, by uid. With automatic sync there are several
-    /// triggers (local change, peer showing up, periodic) that can fire
-    /// almost together: two simultaneous runs against the same device
-    /// would step on each other's half-downloaded files.
-    active: Mutex<HashSet<String>>,
+    slots: Mutex<Slots>,
+    /// Rung when the running sync ends, for whoever is waiting its turn.
+    freed: Condvar,
 }
 
-/// Marks a sync in progress; unmarks it on drop no matter what.
+/// Who is syncing with this device, in either direction.
+#[derive(Default)]
+struct Slots {
+    /// Devices with a sync running or waiting for its turn. With automatic
+    /// sync there are several triggers (local change, peer showing up,
+    /// periodic) that can fire almost together: two simultaneous runs
+    /// against the same device would step on each other's half-downloaded
+    /// files.
+    active: HashSet<String>,
+    /// The one actually running. **One at a time, counting both directions**
+    /// (Fase 2.4): the per-device set alone let the phone pull from the
+    /// server while the PC pushed to it, the same files arriving twice over
+    /// two paths, one of them the slow one. The side being called used to be
+    /// outside this entirely (`engine::serve_requests`); now it takes the
+    /// slot too, and answers `Busy` if it can't.
+    running: Option<String>,
+}
+
+fn slots(state: &AppState) -> MutexGuard<'_, Slots> {
+    state.pairing.slots.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How long an outgoing sync waits for its turn before giving up. Long on
+/// purpose: what it waits for is a transfer, and a first sync of a whole
+/// library takes a while. A hung session can't hold it that long —
+/// `IO_TIMEOUT` cuts it first.
+const SLOT_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
+
+/// Holds a sync slot; frees it on drop no matter what.
 struct SyncGuard(AppHandle, String);
 
 impl SyncGuard {
-    fn acquire(handle: &AppHandle, uid: &str) -> Option<Self> {
+    /// For the side that calls: waits its turn. `None` if a sync with this
+    /// same device is already running or waiting, or the turn never came.
+    fn acquire(handle: &AppHandle, uid: &str, max_wait: Duration) -> Option<Self> {
         let state = handle.state::<AppState>();
-        let mut active = state.pairing.active.lock().ok()?;
-        if !active.insert(uid.to_string()) {
+        let mut s = slots(&state);
+        if !s.active.insert(uid.to_string()) {
             return None; // one is already running with this peer
         }
+        let deadline = Instant::now() + max_wait;
+        if s.running.is_some() {
+            log::info!("[sync] {uid} waits: another sync is running");
+        }
+        while s.running.is_some() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                s.active.remove(uid);
+                log::warn!("[sync] {uid}: gave up waiting for the running sync to end");
+                return None;
+            }
+            s = state
+                .pairing
+                .freed
+                .wait_timeout(s, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        s.running = Some(uid.to_string());
+        Some(SyncGuard(handle.clone(), uid.to_string()))
+    }
+
+    /// For the side being called: doesn't wait. There's a connection open on
+    /// the other end, and making it hang for minutes would only trip its
+    /// timeouts — better to say `Busy` and let it come back.
+    fn try_serve(handle: &AppHandle, uid: &str) -> Option<Self> {
+        let state = handle.state::<AppState>();
+        let mut s = slots(&state);
+        if s.running.is_some() || s.active.contains(uid) {
+            return None;
+        }
+        s.active.insert(uid.to_string());
+        s.running = Some(uid.to_string());
         Some(SyncGuard(handle.clone(), uid.to_string()))
     }
 }
@@ -95,14 +156,45 @@ impl SyncGuard {
 impl Drop for SyncGuard {
     fn drop(&mut self) {
         let state = self.0.state::<AppState>();
-        // The guard goes into its own variable: as an `if let` binding it
-        // would be a temporary that outlives `state`, and it wouldn't compile.
-        let active = state.pairing.active.lock();
-        if let Ok(mut active) = active {
-            active.remove(&self.1);
+        let mut s = slots(&state);
+        s.active.remove(&self.1);
+        if s.running.as_deref() == Some(self.1.as_str()) {
+            s.running = None;
         }
+        drop(s);
+        state.pairing.freed.notify_all();
     }
 }
+
+/// The pairing with that device no longer works, and retrying won't fix it
+/// (Fase 2.3): its key changed, or it rejects ours. Typed so callers can
+/// stop insisting instead of retrying forever against it.
+#[derive(Debug)]
+pub struct PairingBroken(pub String);
+
+impl std::fmt::Display for PairingBroken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PairingBroken {}
+
+/// The other side is syncing with someone else (Fase 2.4). Not a failure:
+/// come back in a moment.
+#[derive(Debug)]
+pub struct PeerBusy;
+
+impl std::fmt::Display for PeerBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("busy syncing with another device")
+    }
+}
+
+impl std::error::Error for PeerBusy {}
+
+/// What's shown on a device whose key changed.
+const KEY_CHANGED: &str = "its key changed - forget it and pair again if that was you";
 
 impl Pairing {
     fn resolve(&self, uid: &str, accepted: bool) -> bool {
@@ -176,6 +268,7 @@ fn store_device(handle: &AppHandle, uid: &str, name: &str, platform: &str, pubke
     let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
     let first = is_first_pairing(&conn)?;
     core_pair::store_device(&conn, uid, name, platform, pubkey)?;
+    state.peers.clear_invalid(uid);
     if first {
         // The first link of a device used to start pulling the whole
         // library right away, with the scope still at its default of
@@ -190,6 +283,17 @@ fn store_device(handle: &AppHandle, uid: &str, name: &str, platform: &str, pubke
         // and is an archive, it takes everything.
         let me = db::this_device_uid(&conn)?;
         sway_core::scope::set_mode(&conn, &me, sway_core::scope::Mode::Selected)?;
+        // What's already here is this device's own: it stays marked. Left
+        // unmarked it would count as a playlist this device merely knows
+        // about — not handed on, and dropped once no linked device has it
+        // (`scope::prune_orphans`).
+        let own: Vec<String> = conn
+            .prepare("SELECT uid FROM playlists WHERE uid IS NOT NULL")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for uid in &own {
+            sway_core::scope::set_playlist(&conn, &me, uid, true)?;
+        }
         db::set_setting(&conn, SCOPE_PROMPT_KEY, "1")?;
     }
     Ok(())
@@ -409,7 +513,9 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                     let _ = sess.send(&Msg::Reject {
                         reason: "different key from the one you already had for this device".into(),
                     });
-                    warn_key_mismatch(handle, &uid, &name);
+                    // Nobody here asked for this connection: no dialog, just
+                    // the row marked as broken.
+                    key_mismatch(handle, &uid, &name);
                     return Err(anyhow!("different key for {uid}"));
                 }
                 Known::Unknown => {
@@ -419,6 +525,12 @@ fn serve(handle: &AppHandle, stream: TcpStream) -> Result<()> {
                     return Ok(());
                 }
             }
+            pairing_ok(handle, &uid);
+            let Some(_slot) = SyncGuard::try_serve(handle, &uid) else {
+                log::info!("[sync] {name} wants to sync, but another sync is running: busy");
+                let _ = sess.send(&Msg::Busy);
+                return Ok(());
+            };
             let (my_uid, my_name) = me(handle)?;
             let (my_tracks, my_playlists) = library_counts(handle);
             sess.send(&Msg::Hello {
@@ -518,7 +630,8 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let private = private_key(handle)?;
-    let mut sess = Session::connect(stream, &private)?;
+    let mut sess =
+        Session::connect(stream, &private).map_err(|e| session_failed(handle, uid, e))?;
 
     let (my_uid, my_name) = me(handle)?;
     match known_state(handle, uid, &sess.peer_pubkey) {
@@ -558,7 +671,11 @@ fn connect_inner(handle: &AppHandle, uid: &str) -> Result<()> {
                     let _ = handle.emit("peers-changed", ());
                     Err(anyhow!("{name} no longer has you paired"))
                 }
-                Msg::Reject { reason } => Err(anyhow!(reason)),
+                Msg::Busy => Err(anyhow!("{name} is syncing with another device - try again in a moment")),
+                Msg::Reject { reason } => {
+                    mark_broken(handle, uid, &format!("it rejects this device: {reason}"));
+                    Err(anyhow!(reason))
+                }
                 other => Err(anyhow!("expected Hello, got {other:?}")),
             }
         }
@@ -674,7 +791,18 @@ pub fn pair_with_server(handle: &AppHandle, host: &str, port: u16, token: &str) 
     stream.set_read_timeout(Some(SERVER_IO_TIMEOUT))?;
     stream.set_write_timeout(Some(SERVER_IO_TIMEOUT))?;
     let private = private_key(handle)?;
-    let mut sess = Session::connect(stream, &private)?;
+    // No uid yet to mark: the version problem goes straight to the dialog.
+    let mut sess = Session::connect(stream, &private).map_err(|e| {
+        match e.downcast_ref::<sway_core::wire::VersionMismatch>() {
+            Some(v) => anyhow!(crate::discovery::update_note(
+                "The server",
+                core_pair::PLATFORM_SERVER,
+                v.peer_is_older,
+                &v.their_app,
+            )),
+            None => e,
+        }
+    })?;
 
     let (my_uid, my_name) = me(handle)?;
     sess.send(&Msg::PairRequest {
@@ -722,10 +850,30 @@ pub fn pair_with_server(handle: &AppHandle, host: &str, port: u16, token: &str) 
     })?;
 
     store_device(handle, &their_uid, &their_name, &their_platform, &sess.peer_pubkey)?;
-    {
+    let address = format!("{host}:{port}");
+    let stale: Vec<String> = {
         let state = handle.state::<AppState>();
         let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
-        core_pair::set_device_address(&conn, &their_uid, &format!("{host}:{port}"))?;
+        core_pair::set_device_address(&conn, &their_uid, &address)?;
+        // Another device at this same address: it's this server from before
+        // it was reinstalled (new keys, new uid). That row can never
+        // authenticate again, and it used to stay forever next to the new
+        // one — red, retrying, resurrected on every startup (Fase 2.3).
+        let stale: Vec<String> = core_pair::devices_with_address(&conn)
+            .into_iter()
+            .filter(|(uid, _, _, addr)| uid != &their_uid && addr == &address)
+            .map(|(uid, ..)| uid)
+            .collect();
+        for uid in &stale {
+            core_pair::forget_device(&conn, uid)?;
+        }
+        stale
+    };
+    for uid in stale {
+        log::info!("[pair] {uid} was the previous identity of {their_name}: forgotten");
+        let state = handle.state::<AppState>();
+        state.peers.forget(&uid);
+        state.watchers.wake(&uid);
     }
     // Enters the same list as mDNS peers: from here down it's just another
     // device.
@@ -859,15 +1007,31 @@ pub(crate) fn open_session_with(
     read_timeout: Duration,
 ) -> Result<Session> {
     let addr = peer_addr(handle, uid)?;
-    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
+    let stream = match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+        Ok(s) => s,
+        // Nobody answers: say so now. Before, only the probe could turn it
+        // grey, and it skips devices with a watcher — a server that went
+        // away stayed green (Fase 2.1).
+        Err(e) => {
+            let state = handle.state::<AppState>();
+            if state.peers.mark_unreachable(uid) {
+                let _ = handle.emit("peers-changed", ());
+            }
+            return Err(e.into());
+        }
+    };
     stream.set_read_timeout(Some(read_timeout))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let private = private_key(handle)?;
-    let mut sess = Session::connect(stream, &private)?;
+    let mut sess =
+        Session::connect(stream, &private).map_err(|e| session_failed(handle, uid, e))?;
 
     match known_state(handle, uid, &sess.peer_pubkey) {
         Known::Trusted => {}
-        Known::KeyMismatch => return Err(anyhow!("the device key does not match")),
+        Known::KeyMismatch => {
+            key_mismatch(handle, uid, &peer_name(handle, uid));
+            return Err(PairingBroken(KEY_CHANGED.into()).into());
+        }
         Known::Unknown => return Err(anyhow!("not paired yet")),
     }
 
@@ -882,13 +1046,78 @@ pub(crate) fn open_session_with(
         clock_ms: db::now_ms(),
     })?;
     match sess.recv()? {
-        Msg::Hello { .. } => Ok(sess),
+        Msg::Hello { .. } => {
+            pairing_ok(handle, uid);
+            Ok(sess)
+        }
         Msg::NotPaired => {
             forget_device(handle, uid)?;
             let _ = handle.emit("peers-changed", ());
             Err(anyhow!("that device no longer has you paired"))
         }
+        Msg::Busy => Err(PeerBusy.into()),
+        // The other side has a different key stored for us.
+        Msg::Reject { reason } => {
+            mark_broken(handle, uid, &format!("it rejects this device: {reason}"));
+            Err(PairingBroken(reason).into())
+        }
         other => Err(anyhow!("expected Hello, got {other:?}")),
+    }
+}
+
+/// How long the Refresh button waits for each device to answer.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The Refresh button: brings everything that otherwise updates over time
+/// up to date now.
+///
+/// It used to only re-ask mDNS and probe the port, and that left out the
+/// states that matter most: a server whose token changed kept showing as
+/// paired until the watcher happened to reconnect, and a device with a
+/// standing connection wasn't probed at all. Now it also opens a session
+/// with every paired device that answers — the only way to learn that the
+/// other side unpaired us (`NotPaired`), changed its key, or rejects ours —
+/// and wakes the watchers, so a server that just came back is watched again
+/// right away instead of after its backoff.
+pub fn check_now(handle: &AppHandle) {
+    if let Err(e) = crate::discovery::refresh(handle) {
+        log::debug!("[pair] refresh: mDNS query failed: {e}");
+    }
+    crate::discovery::probe_all(handle);
+    let reachable: Vec<String> = {
+        let state = handle.state::<AppState>();
+        let Ok(conn) = state.db.lock() else { return };
+        state
+            .peers
+            .merged_list(&conn)
+            .into_iter()
+            .filter(|p| p.paired && p.online)
+            .map(|p| p.uid)
+            .collect()
+    };
+    let checks: Vec<_> = reachable
+        .into_iter()
+        .map(|uid| {
+            let handle = handle.clone();
+            std::thread::spawn(move || verify_pairing(&handle, &uid))
+        })
+        .collect();
+    for c in checks {
+        let _ = c.join();
+    }
+    let _ = handle.emit("peers-changed", ());
+}
+
+/// Says hello and leaves. Everything worth knowing is recorded on the way by
+/// `open_session_with`: unreachable, broken, unpaired, or fine.
+fn verify_pairing(handle: &AppHandle, uid: &str) {
+    handle.state::<AppState>().watchers.wake(uid);
+    match open_session_with(handle, uid, VERIFY_TIMEOUT) {
+        Ok(mut sess) => {
+            let _ = sess.send(&Msg::Bye);
+        }
+        // Busy syncing with someone else still means paired and there.
+        Err(e) => log::debug!("[pair] refresh: {uid}: {e}"),
     }
 }
 
@@ -953,11 +1182,8 @@ pub fn wait_until_idle(handle: &AppHandle, uids: &[String], max: Duration) {
     while std::time::Instant::now() < until {
         let busy = {
             let state = handle.state::<AppState>();
-            let active = state.pairing.active.lock();
-            match active {
-                Ok(a) => uids.iter().any(|u| a.contains(u)),
-                Err(_) => false,
-            }
+            let s = slots(&state);
+            uids.iter().any(|u| s.active.contains(u))
         };
         if !busy {
             return;
@@ -977,14 +1203,28 @@ fn run_sync(handle: AppHandle, uid: String, auto: bool) {
 /// starts waiting for updates, and if it doesn't wait for the run to finish
 /// it would end up waiting against a state it's about to change itself.
 pub(crate) fn run_sync_blocking(handle: AppHandle, uid: String, auto: bool) {
-    {
-        let Some(_guard) = SyncGuard::acquire(&handle, &uid) else {
+    let started = Instant::now();
+    let mut backoff = BUSY_RETRY_MIN;
+    loop {
+        let Some(guard) = SyncGuard::acquire(&handle, &uid, SLOT_MAX_WAIT) else {
             log::debug!("[sync] a sync with {uid} is already running");
             return;
         };
         let name = peer_name(&handle, &uid);
         let result = sync_inner(&handle, &uid);
         crate::sync_notice::end(&handle, &uid);
+        // The other side is syncing with someone else. Our slot goes back
+        // before waiting: holding it would make that someone get `Busy` from
+        // us too, and both would wait on each other.
+        if result.as_ref().is_err_and(|e| e.is::<PeerBusy>())
+            && started.elapsed() < BUSY_GIVE_UP
+        {
+            drop(guard);
+            log::info!("[sync] {name} is busy with another device: retrying");
+            std::thread::sleep(backoff + jitter());
+            backoff = (backoff * 2).min(BUSY_RETRY_MAX);
+            continue;
+        }
         match result {
             Ok(engine::SyncResult { received, sent, failed, bytes, organized }) => {
                 log::info!(
@@ -1015,12 +1255,17 @@ pub(crate) fn run_sync_blocking(handle: AppHandle, uid: String, auto: bool) {
                 // still reported when a person requested the sync and is
                 // watching.
                 let cut = is_disconnect(&e);
+                // A broken pairing is already on screen, on the device's row:
+                // a banner on every automatic attempt would add nothing.
+                let quiet = e.is::<PairingBroken>() || e.is::<PeerBusy>();
                 let error = if cut {
                     if auto {
                         None
                     } else {
                         Some("connection lost".to_string())
                     }
+                } else if quiet && auto {
+                    None
                 } else {
                     Some(e.to_string())
                 };
@@ -1040,7 +1285,27 @@ pub(crate) fn run_sync_blocking(handle: AppHandle, uid: String, auto: bool) {
                 );
             }
         }
+        return;
     }
+}
+
+/// Waits between attempts against a busy device. It grows: a first sync of
+/// a whole library on the other end takes minutes.
+const BUSY_RETRY_MIN: Duration = Duration::from_secs(3);
+const BUSY_RETRY_MAX: Duration = Duration::from_secs(30);
+/// Past this it stops insisting; the next trigger (a change, the periodic
+/// pass, the device showing up again) tries again.
+const BUSY_GIVE_UP: Duration = Duration::from_secs(20 * 60);
+
+/// Up to two seconds of noise. Two devices that call each other at the same
+/// instant both get `Busy`; retrying with the exact same wait, they'd keep
+/// colliding.
+fn jitter() -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    Duration::from_millis(u64::from(nanos % 2000))
 }
 
 /// A full run against an already paired device.
@@ -1142,18 +1407,63 @@ fn emit_done(handle: &AppHandle, uid: &str, name: &str, ok: bool, error: Option<
 }
 
 /// A different key for a known uid could be a reinstall on the other side —
-/// or someone impersonating it. It doesn't resolve itself: it gets logged
-/// and the user has to unpair by hand to pair again.
-fn warn_key_mismatch(handle: &AppHandle, uid: &str, name: &str) {
-    {
-        let state = handle.state::<AppState>();
-        // The guard goes into its own variable: as an `if let` binding it
-        // would be a temporary that outlives `state`, and it wouldn't compile.
-        let db = state.db.lock();
-        if let Ok(conn) = db {
-            core_pair::log_key_mismatch(&conn, uid, name);
-        }
+/// or someone impersonating it. It doesn't resolve itself: the device is
+/// marked as broken (the UI offers to forget it) and it's logged, once.
+/// Trust is never restored on its own: forgetting and pairing again is the
+/// person's call.
+fn key_mismatch(handle: &AppHandle, uid: &str, name: &str) {
+    if !mark_broken(handle, uid, KEY_CHANGED) {
+        return;
     }
+    let state = handle.state::<AppState>();
+    // The guard goes into its own variable: as an `if let` binding it
+    // would be a temporary that outlives `state`, and it wouldn't compile.
+    let db = state.db.lock();
+    if let Ok(conn) = db {
+        core_pair::log_key_mismatch(&conn, uid, name);
+    }
+}
+
+/// Opening a session with `uid` failed. If it was the version exchange (2.8),
+/// the device is marked "update needed" naming who, and the error becomes a
+/// `PairingBroken`: retrying can't fix it until someone updates, and the
+/// watcher and autosync already know to stop on that.
+fn session_failed(handle: &AppHandle, uid: &str, e: anyhow::Error) -> anyhow::Error {
+    let Some(v) = e.downcast_ref::<sway_core::wire::VersionMismatch>() else { return e };
+    let note = crate::discovery::update_note(
+        &peer_name(handle, uid),
+        &platform_of(handle, uid),
+        v.peer_is_older,
+        &v.their_app,
+    );
+    if handle.state::<AppState>().peers.set_outdated(uid, &note) {
+        log::warn!("[pair] {uid}: {v}");
+        let _ = handle.emit("peers-changed", ());
+    }
+    PairingBroken(note).into()
+}
+
+/// Marks the pairing with `uid` as broken (Fase 2.3). `true` if it's news.
+fn mark_broken(handle: &AppHandle, uid: &str, reason: &str) -> bool {
+    let state = handle.state::<AppState>();
+    if !state.peers.set_invalid(uid, reason) {
+        return false;
+    }
+    log::warn!("[pair] pairing with {uid} is broken: {reason}");
+    let _ = handle.emit("peers-changed", ());
+    true
+}
+
+/// The pairing just worked end to end: whatever was marked broken isn't.
+fn pairing_ok(handle: &AppHandle, uid: &str) {
+    if handle.state::<AppState>().peers.clear_invalid(uid) {
+        let _ = handle.emit("peers-changed", ());
+    }
+}
+
+/// Same, for a connection a person asked for: they're looking at a dialog.
+fn warn_key_mismatch(handle: &AppHandle, uid: &str, name: &str) {
+    key_mismatch(handle, uid, name);
     emit_done(
         handle,
         uid,
@@ -1165,8 +1475,20 @@ fn warn_key_mismatch(handle: &AppHandle, uid: &str, name: &str) {
 
 fn forget_device(handle: &AppHandle, uid: &str) -> Result<()> {
     let state = handle.state::<AppState>();
-    let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
-    core_pair::forget_device(&conn, uid)
+    let pruned = {
+        let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
+        core_pair::forget_device(&conn, uid)?;
+        // Playlists only that device had, and this one doesn't hold, go too.
+        sway_core::scope::prune_orphans(&conn)?
+    };
+    if pruned > 0 {
+        emit_library_changed(handle, true);
+    }
+    state.peers.clear_invalid(uid);
+    // A watcher napping against a broken device would otherwise sleep its
+    // hour before noticing the device is gone.
+    state.watchers.wake(uid);
+    Ok(())
 }
 
 /// Removes a device from the trusted list and **notifies it**.
@@ -1176,28 +1498,34 @@ fn forget_device(handle: &AppHandle, uid: &str) -> Result<()> {
 /// going to fix it: the device list has nothing to do with what mDNS sees.
 /// The notification is best-effort — if the other side is off, it finds out
 /// only the next time it tries to connect and gets `NotPaired`.
+///
+/// Also works on a server that already dropped us (its token changed): it's
+/// no longer paired, but it's still on the list showing "Needs token", and
+/// this is how it leaves.
 pub fn unpair(handle: &AppHandle, uid: &str) -> Result<()> {
     let addr = peer_addr(handle, uid).ok();
-    // If it had a fixed address (a server), it also leaves the on-screen
-    // list. A LAN peer gets re-announced by mDNS within seconds; nobody
-    // announces this one, so it would stay there forever with a "Pair"
-    // button that can't work — that button drives the local-network flow,
-    // with no token, and a server with no token says no.
-    let manual = {
+    let paired = {
         let state = handle.state::<AppState>();
         let db = state.db.lock();
         match db {
-            Ok(conn) => core_pair::devices_with_address(&conn)
-                .iter()
-                .any(|(u, _, _, _)| u == uid),
+            Ok(conn) => conn
+                .query_row("SELECT 1 FROM devices WHERE uid = ?1", [uid], |_| Ok(()))
+                .is_ok(),
             Err(_) => false,
         }
     };
+    // A server also leaves the on-screen list. A LAN peer gets re-announced
+    // by mDNS within seconds; nobody announces this one, so it would stay
+    // there forever with a "Pair" button that can't work — that button
+    // drives the local-network flow, with no token, and a server with no
+    // token says no.
+    let server = platform_of(handle, uid) == core_pair::PLATFORM_SERVER;
     forget_device(handle, uid)?;
-    if manual {
+    if server {
         handle.state::<AppState>().peers.forget(uid);
     }
-    if let Some(addr) = addr {
+    // Nothing to tell a device that no longer has us.
+    if let Some(addr) = addr.filter(|_| paired) {
         let handle = handle.clone();
         let uid = uid.to_string();
         std::thread::spawn(move || {

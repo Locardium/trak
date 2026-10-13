@@ -4,26 +4,33 @@
 > Detalle de cada ítem (causa raíz, archivos, fix): `PLAN-BETA1.md`. Historia: `LOG.md`.
 > Lista original del usuario: `notes.txt` (raíz, gitignoreado).
 
-**Última actualización:** 2026-09-29
-**Fase actual:** ninguna en curso. Fase 4 cerrada y commiteada 2026-09-29.
-**Git:** sólo existe `master` (fases 1, 3 y 4 adentro). Las ramas `beta1-fase1-3`,
+**Última actualización:** 2026-10-13 (Fase 2 completa y commiteada; 2.6-2.8 sin probar en device)
+**Fase actual:** Fase 2 — 2.1-2.5 confirmadas por el usuario; 2.6, 2.7 y 2.8 hechas con tests,
+falta probarlas en device. Todo commiteado en `master` 2026-10-13 (dos commits: "dev de Windows
+aislado" y Fase 2). Fase 4 cerrada y commiteada 2026-09-29.
+**Git:** sólo existe `master` (fases 1-4 adentro). Las ramas `beta1-fase1-3`,
 `beta1-fase4`, `backup-pre-rewrite` y el stash viejo se borraron 2026-09-29 (ver LOG). El push
 lo hace el usuario.
-**Próximo paso (en este orden):**
-1. **Fase 2** (2.1-2.4, estado de conexión con el server — hacerla junta).
+**Próximo paso (en este orden, actualizado 2026-10-13):**
+0. Probar 2.6, 2.7 y 2.8 en device (cómo, en cada ítem de la Fase 2 abajo). Antes de cada commit:
+   `gen/android/app/build.gradle.kts` sale `w/mixed` por el CLI de Tauri → `git checkout`.
+1. Al probar: PC + celu + server con protocolo 2 (2.8 ya chequea: un build viejo sale como
+   "Update needed"; la release instalada 1.0.0-1 no tiene chequeo y se actualiza a mano). Datos dev: PC dev en `<Music>\Sway Dev`, server dev con
+   `pnpm server:dev` (corre en `target/server-dev/`: `config.toml`, `data/`, `music/` ahí).
 2. **Fase 5** (5.1 artefactos del release en `dist/<tag>/` + APK; 5.2 README del server en Linux).
 3. Pendiente de confirmación en uso real (hecho, el usuario no lo dijo explícito): 1.2/1.3/1.4
    (lag y notificación de sync con pantalla apagada), 1.6 (botones en background largo), y 1.7
    parte A tras matar el proceso. 1.7 parte B (reanudación Media3 con proceso muerto) en reserva.
 4. Fase 6 (rediseño de UI) se planea aparte después.
 
-**Todo lo de las fases 1, 3 y 4 está commiteado en `master`** (ver LOG).
+**Todo lo de las fases 1-4 está commiteado en `master`** (ver LOG).
 Ojo con los finales de línea: varios archivos del repo son CRLF en el índice (`git ls-files
 --eol`); si un editor/script los deja en LF, el diff sale entero. Antes de commitear:
 `git ls-files --eol | awk '$1=="i/crlf" && $2!="w/crlf"'` debe salir vacío.
 
-**Protocolo de sync cambiado sin compatibilidad** (pedido del usuario): `BlobReq`/`BlobPush`
-llevan `index`/`of` obligatorios → PC, celu y server tienen que estar en la misma versión.
+**Protocolo de sync versionado desde 2.8** (`wire::PROTOCOL` = 2, `MIN_PROTOCOL` = 2): lo de la
+Fase 2 es protocolo 2. Builds viejos (1.0.0-1, sin versión) salen "Update needed". Regla de bump
+en `CLAUDE.md`.
 
 **Builds en el S24:** release `com.locardium.sway` instalada 2026-09-25 14:24:46 (tiene 1.7A + 1.8
 + filtro de logs + 3.2 título/artista). Dev `com.locardium.sway.dev` = lo que haya corrido el
@@ -75,11 +82,57 @@ Leyenda: ⬜ pendiente · 🟡 en curso · ✅ hecho y verificado · 🧪 hecho,
   **Parte B pendiente:** reanudación Media3 (`onPlaybackResumption` + `MediaButtonReceiver`) para
   botones con el proceso muerto SIN abrir la app.
 
-## Fase 2 — Sync / servidor
-- ⬜ 2.1 Desconexión del server no se muestra
-- ⬜ 2.2 Aparece conectado antes de tiempo
-- ⬜ 2.3 Pairing viejo no se olvida cuando el token/clave no matchea
-- ⬜ 2.4 El celu recibe del server y de la PC a la vez (semáforo global de sync)
+## Fase 2 — Sync / servidor (2.1-2.5 hechas 2026-09-29, 2.6-2.8 2026-10-13; commiteada 2026-10-13, detalle en LOG)
+- ✅ 2.1 Desconexión del server no se muestra (confirmado por el usuario 2026-09-29) — connect fallido marca gris al toque; heartbeat
+  25 s / timeout 60 s. Probar: apagar el server (proceso y cable/red) → gris en segundos / ≤ ~65 s.
+- ✅ 2.2 Aparece conectado antes de tiempo (confirmado por el usuario 2026-09-29) — estado "Checking…" hasta el primer probe; mDNS ya no
+  pinta verde. Probar: abrir la app con PC/server prendidos y apagados.
+- ✅ 2.3 (confirmado por el usuario 2026-10-09: token, badge, refresh, re-emparejar misma dirección) Pairing viejo no se olvida — badge rojo "Pairing broken" + "Forget"; re-emparejar un
+  server en la misma dirección borra la fila vieja. Probar: borrar la DB del server, re-emparejar.
+  Además (pedido del usuario): cambiar `pair_token` + reiniciar el server revoca los pairings
+  hechos con el token viejo (la app lo olvida y hay que re-emparejar). Los pairings previos a este
+  cambio no tienen token guardado → se revocan una vez al actualizar el server.
+  Refresh ahora chequea todo (probe + Hello a cada emparejado) y un server "Needs token" tiene
+  "Pair again" y "Remove".
+- ✅ 2.4 (confirmado por el usuario 2026-10-09 en uso, sin mirar logcat) El celu recibe del server y de la PC a la vez — un sync por vez por device (`Msg::Busy` +
+  reintento). Probar: cargar música en la PC con el celu cerrado, abrir el celu → log `[sync] ...
+  waits` / `busy`, y que no reciba de los dos a la vez.
+
+- ✅ 2.5 (reportado 2026-09-29) Playlists no seleccionadas se reenviaban vacías a devices nuevos, y
+  quedaban en el celu tras desvincular al único que las tenía. Fix: `held` en el manifest +
+  poda local de huérfanas (ver LOG). El usuario confirmó 2026-10-13 que marcar A/B y desvincular
+  anda bien.
+- 🧪 2.7 (reportado 2026-10-13, hecho 2026-10-13, tests ok, falta probar en device) Re-vincular
+  aplicaba borrados hechos mientras estaban desvinculados. Causa: `changes_for_peer` manda todos
+  los tombstones y `merge::apply` los aplicaba todos, sin mirar `devices.paired_at`; además un
+  tombstone le ganaba siempre a tracks/playlists (no había forma de "mantener"). Fix: tombstone
+  con `deleted_at < paired_at` del peer que lo manda, para algo que existe acá → tabla local
+  `held_deletes` + diálogo "X deleted music you have here" (Delete here too / Keep and send
+  back). Tombstones ahora LWW contra `updated_at` (tracks/playlists) → "Keep" sube el reloj y el
+  ítem vuelve al otro. Server no pregunta (aplica como antes). Detalle en LOG. Probar: repro del
+  usuario (PC borra A/B + temas con el celu desvinculado, re-vincular → diálogo en el celu, nada
+  borrado; "Keep" → vuelven a la PC; repetir con "Delete" → papelera).
+- 🧪 2.8 (hecho 2026-10-13, tests ok, falta probar entre devices) Versión de protocolo en core.
+  `wire::PROTOCOL = 2`, `MIN_PROTOCOL = 2`, frame `Version` dentro de `Session::connect/accept`,
+  error tipado `VersionMismatch`, badge "Update needed" + mensaje con quién, log del server, test
+  `protocol_fingerprint`, regla en `CLAUDE.md`. Detalle en LOG. Diseño acordado (referencia):
+  `PROTOCOL` + `MIN_PROTOCOL` en `sway-core`; intercambio `{protocolo, versión app}` como PRIMER
+  frame tras el handshake Noise (antes de cualquier `Msg`, porque con protocolos distintos puede
+  no parsear ni el `Hello`); igual → sync normal; distinto pero dentro de rango → sync con las
+  features del más viejo (gating `peer_protocol >= N`); fuera de rango → no sincroniza, badge
+  "Update needed" diciendo QUIÉN está atrás ("Sway Server is older — update sway-server") + log
+  en el server. Cambios aditivos (campo `serde(default)`, mensaje nuevo) suben sólo `PROTOCOL`;
+  rompientes suben `MIN_PROTOCOL`. **Para no olvidarse**: test con "huella" de todos los `Msg`
+  serializados que falla si cambia el protocolo sin bump ("protocol changed: bump PROTOCOL (and
+  MIN_PROTOCOL if it breaks), then update the fingerprint") + regla en `CLAUDE.md`. Reemplaza
+  el `PROTO = "1"` de mDNS (`discovery.rs`, `SYNC_PROTO` en `api.ts`). Lo de la Fase 2 sale como
+  protocolo 2 / mínimo 2: la release instalada (1.0.0-1, sin chequeo) se actualiza a mano una vez.
+- 🧪 2.6 (hallado 2026-09-29, hecho 2026-10-13, tests ok) Server recibía el mismo archivo de dos
+  devices a la vez: doble subida y colisión del `.part`. Fix: `Msg::BlobPushAck { wanted }`
+  antes de los bytes (no si ya lo tiene o si otra sesión lo está recibiendo, `claim_push`) +
+  partial de push propio `<hash>.push.part`. Entra en el protocolo 2 (sin release todavía).
+  Probar: celu y PC subiendo el mismo tema al server a la vez → log "not needed (another device
+  is sending it)" y una sola copia.
 
 ## Fase 3 — Audio
 - ✅ 3.1 Normalize satura — −14 LUFS + pico medido + techo −1 dBFS al boostear, hecho 2026-09-25
@@ -109,6 +162,9 @@ Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que deber�
 - ⬜ Se planea aparte cuando terminen las fases 1-5.
 
 ## Quedó a medias / notas abiertas
+- 🧪 Dev de Windows aislado del release (2026-09-29, sin commit): `<Music>\Sway Dev`,
+  identifier `.dev`, nombre `<PC> Dev` (XML de iTunes compartido, a propósito). Ver LOG. Falta correrlo con el release
+  abierto al mismo tiempo.
 - 1.6 y la exención de batería (1.3 parcial) ya están instalados en el S24 (2026-09-25, adb sobre
   LAN 192.168.0.6:5555 — Tailscale no respondió esa vez, no hace falta investigarlo). Falta la
   prueba de uso real: activar la exención en Settings, y ver si next/prev por Bluetooth/

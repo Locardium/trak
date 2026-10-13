@@ -124,6 +124,57 @@ fn with_the_right_token_the_device_gets_paired() {
     assert_eq!(devices(&server), 1, "the device did not get stored");
 }
 
+/// Changing `pair_token` works like changing a password: a device paired
+/// with the old one is told it's no longer paired, and its row goes away.
+#[test]
+fn a_new_token_revokes_old_pairings() {
+    let (server, addr) = start("rotate");
+    let (private, _) = generate_keypair().unwrap();
+    let open = |addr: &str| {
+        let stream = TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
+        Session::connect(stream, &private).unwrap()
+    };
+
+    let mut sess = open(&addr);
+    sess.send(&pair_request(Some(TOKEN))).unwrap();
+    assert!(matches!(sess.recv().unwrap(), Msg::PairResponse { accepted: true }));
+    sess.send(&Msg::PairAck { accepted: true }).unwrap();
+    assert!(matches!(sess.recv().unwrap(), Msg::Hello { .. }));
+    sess.send(&hello()).unwrap();
+    drop(sess);
+    for _ in 0..100 {
+        if devices(&server) == 1 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Same token: still welcome.
+    let mut sess = open(&addr);
+    sess.send(&hello()).unwrap();
+    assert!(matches!(sess.recv().unwrap(), Msg::Hello { .. }), "same token must still work");
+    drop(sess);
+
+    // Same data, restarted with another token.
+    let rotated = Arc::new(Server {
+        host: Arc::clone(&server.host),
+        token: "a-new-token".into(),
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr2 = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = serve::run(rotated, listener);
+    });
+    let mut sess = open(&addr2);
+    sess.send(&hello()).unwrap();
+    match sess.recv().unwrap() {
+        Msg::NotPaired => {}
+        other => panic!("expected NotPaired, got {other:?}"),
+    }
+    assert_eq!(devices(&server), 0, "the old pairing has to be gone");
+}
+
 #[test]
 fn without_the_token_it_does_not_get_in() {
     let (server, addr) = start("mal");

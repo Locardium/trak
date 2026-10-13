@@ -78,6 +78,16 @@ pub trait Host {
     /// up and goes out to sync something it just sent itself.
     fn note_change_by(&self, _peer_uid: &str) {}
 
+    /// Whether this device can ask the user about deletions a peer made
+    /// while they weren't linked (2.7). If not —the server has no screen—
+    /// they're applied like any other.
+    fn confirms_deletions(&self) -> bool {
+        false
+    }
+
+    /// Some deletions were just held for the user (see `merge::pending_deletes`).
+    fn deletions_held(&self) {}
+
     /// How far this library has gotten: the current run and how many times it
     /// moved since it started.
     ///
@@ -132,14 +142,17 @@ pub struct Seen {
 /// between 30 and 60 seconds. It was measured: at two minutes, the phone's
 /// connection lived for 17 to 47 seconds at a time.
 ///
-/// Forty-five seconds falls under that limit and on top of that halves how
-/// long it takes the server to realize nobody's on the other end anymore —
-/// it only finds out when the heartbeat fails, and until then it has a thread
-/// stuck talking to a dead connection.
+/// Twenty-five seconds falls under that limit with margin, and it's also what
+/// bounds how long a server that died without closing the connection (power
+/// cut, network gone) keeps showing up as connected: the app gives up after
+/// a bit over two missed heartbeats (`watch.rs` `READ_TIMEOUT`). At 45 s that
+/// was two minutes of a green server that wasn't there (Fase 2.1). The
+/// server finds out sooner too — it only notices nobody's on the other end
+/// when a heartbeat fails.
 ///
 /// It's still cheap: a frame of a few dozen bytes, against the TCP polling
 /// every 10 seconds that this replaces.
-pub const WATCH_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(45);
+pub const WATCH_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(25);
 
 // ---------------------------------------------------------------------------
 // Result
@@ -268,6 +281,27 @@ pub fn serve_requests<H: Host>(
                 ..
             } => {
                 let music_dir = host.music_dir();
+                // Asked before any byte travels (2.6): not if it's already
+                // here, nor if another session is receiving it right now —
+                // two devices pushing the same file to the server at once
+                // used to send it twice and collide on the partial.
+                let have = host
+                    .with_db(|conn| Ok(crate::transfer::path_for_hash(conn, &hash).is_some()))?;
+                let claim = if have {
+                    None
+                } else {
+                    crate::transfer::claim_push(&music_dir, &hash)
+                };
+                sess.send(&Msg::BlobPushAck {
+                    wanted: claim.is_some(),
+                })?;
+                let Some(_claim) = claim else {
+                    log::info!(
+                        "[sync] {filename}: not needed ({})",
+                        if have { "already here" } else { "another device is sending it" }
+                    );
+                    continue;
+                };
                 // Push: the other side sends from scratch, not resuming anything of ours.
                 let mut progress = |done: u64, total: u64| {
                     host.progress(&Progress {
@@ -285,7 +319,7 @@ pub fn serve_requests<H: Host>(
                     &music_dir,
                     &hash,
                     &filename,
-                    false,
+                    true,
                     &mut progress,
                     &mut |dest| host.expect_path(dest),
                 )?;
@@ -325,8 +359,13 @@ pub fn serve_requests<H: Host>(
             // Organization changes sent to us by the other side.
             Msg::MetaPush { changes } => {
                 let music_dir = host.music_dir();
-                let applied =
-                    host.with_db(|conn| Ok(crate::merge::apply(conn, &changes, &music_dir)?))?;
+                let confirm = host.confirms_deletions().then_some(peer_uid);
+                let applied = host
+                    .with_db(|conn| Ok(crate::merge::apply(conn, &changes, &music_dir, confirm)?))?;
+                if applied.held > 0 {
+                    log::info!("[sync] {} deletion(s) from {peer_uid} held for the user", applied.held);
+                    host.deletions_held();
+                }
                 if applied.total() > 0 {
                     // All five figures, not three. `total()` also counts scope
                     // and deletions, so changing a direction or checking a
@@ -675,7 +714,22 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
                 sending: true,
             });
         };
-        match push.and_then(|_| crate::transfer::send_file(sess, &path, 0, &f.hash, &mut progress)) {
+        // The other side says first whether it wants it (2.6).
+        let wanted = push.and_then(|_| match sess.recv()? {
+            Msg::BlobPushAck { wanted } => Ok(wanted),
+            other => Err(anyhow!("expected BlobPushAck, got {other:?}")),
+        });
+        let sending = match wanted {
+            Ok(true) => crate::transfer::send_file(sess, &path, 0, &f.hash, &mut progress),
+            Ok(false) => {
+                // Already there, or arriving from another device: the next
+                // sync sees it and counts it as a replica then.
+                log::info!("[sync] {}: the other side doesn't need it", f.filename);
+                continue;
+            }
+            Err(e) => Err(e),
+        };
+        match sending {
             Ok(()) => {
                 bytes += f.size as u64;
                 sent += 1;
@@ -722,8 +776,22 @@ pub fn sync<H: Host>(host: &H, sess: &mut Session, peer_uid: &str) -> Result<Syn
         crate::merge::Changes::default()
     };
 
-    let applied_here =
-        host.with_db(|conn| Ok(crate::merge::apply(conn, &theirs, &music_dir)?))?;
+    let (applied_here, pruned) = host.with_db(|conn| {
+        let confirm = host.confirms_deletions().then_some(peer_uid);
+        let applied = crate::merge::apply(conn, &theirs, &music_dir, confirm)?;
+        // Now we know what that device holds; whatever nobody linked holds
+        // anymore — and this device doesn't either — goes.
+        crate::scope::note_sources(conn, peer_uid, &remote.playlists)?;
+        let pruned = crate::scope::prune_orphans(conn)?;
+        Ok((applied, pruned))
+    })?;
+    if pruned > 0 {
+        host.library_changed(true);
+    }
+    if applied_here.held > 0 {
+        log::info!("[sync] {} deletion(s) from {peer_uid} held for the user", applied_here.held);
+        host.deletions_held();
+    }
     if applied_here.scope > 0 {
         restore(host);
     }
@@ -972,6 +1040,11 @@ mod tests {
         fn with_db<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
             let conn = self.db.lock().map_err(|_| anyhow!("db lock"))?;
             f(&conn)
+        }
+        // Like the app. Devices with no `devices` row (most tests) have no
+        // pairing date, so nothing is held for them.
+        fn confirms_deletions(&self) -> bool {
+            true
         }
         fn music_dir(&self) -> PathBuf {
             self.dir.clone()
@@ -1400,6 +1473,193 @@ mod tests {
             (0, 0, 0),
             "after resolving the conflict they have to stay put"
         );
+    }
+
+    /// 2.6: while another session is receiving a file (two devices pushing
+    /// the same track to the server at once), the second push is turned
+    /// down before any byte travels, and the next sync brings it normally.
+    #[test]
+    fn a_file_already_coming_in_is_not_pushed_twice() {
+        let phone = Device::new("twice-phone");
+        let server = Device::new("twice-server");
+        phone.add_track("uno.flac", &audio(4096, 41), "One");
+        let hash: String = phone
+            .with_db(|c| Ok(c.query_row("SELECT content_hash FROM tracks", [], |r| r.get(0))?))
+            .unwrap();
+
+        let other_device = crate::transfer::claim_push(&server.music_dir(), &hash).unwrap();
+        assert!(crate::transfer::claim_push(&server.music_dir(), &hash).is_none());
+        let r = sync_once(&phone, &server).unwrap();
+        assert_eq!((r.sent, r.failed), (0, 0), "turned down, not failed");
+        assert!(server.audio_files().is_empty());
+
+        drop(other_device);
+        let r = sync_once(&phone, &server).unwrap();
+        assert_eq!(r.sent, 1);
+        assert_eq!(server.audio_files().len(), 1);
+        assert!(server.partials().is_empty());
+    }
+
+    /// Pairs `a` and `b` as of now on both sides (re-pairing overwrites the date).
+    fn pair(a: &Device, b: &Device) {
+        let (au, bu) = (a.uid(), b.uid());
+        a.with_db(|c| Ok(crate::pairing::store_device(c, &bu, "B", "android", &[0])?)).unwrap();
+        b.with_db(|c| Ok(crate::pairing::store_device(c, &au, "A", "windows", &[0])?)).unwrap();
+    }
+
+    fn unpair(a: &Device, b: &Device) {
+        let (au, bu) = (a.uid(), b.uid());
+        a.with_db(|c| Ok(crate::pairing::forget_device(c, &bu)?)).unwrap();
+        b.with_db(|c| Ok(crate::pairing::forget_device(c, &au)?)).unwrap();
+    }
+
+    fn held_from(d: &Device) -> Vec<crate::merge::PendingDeletes> {
+        d.with_db(|c| Ok(crate::merge::pending_deletes(c)?)).unwrap()
+    }
+
+    /// Bug 2.7: the PC deletes playlists and tracks while the phone is
+    /// unlinked; re-linking used to delete them on the phone too. Re-linking
+    /// is like linking a new device: the deletes are held and asked, and
+    /// "keep" sends everything back to the PC.
+    #[test]
+    fn re_linking_holds_deletes_made_while_unlinked_and_keep_sends_them_back() {
+        let pc = Device::new("relink-pc");
+        let phone = Device::new("relink-phone");
+        let t1 = pc.add_track("uno.flac", &audio(2048, 21), "One");
+        let t2 = pc.add_track("dos.flac", &audio(2048, 22), "Two");
+        let set = pc.playlist("Set", None);
+        pc.add_to_playlist(set, &[&t1, &t2]);
+        pair(&pc, &phone);
+        sync_once(&phone, &pc).unwrap();
+        assert_eq!(phone.track_uids().len(), 2);
+
+        unpair(&pc, &phone);
+        pc.delete_track(&t1);
+        pc.with_db(|c| Ok(crate::db::delete_playlist(c, set)?)).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        pair(&pc, &phone);
+        sync_once(&phone, &pc).unwrap();
+
+        assert_eq!(phone.track_uids().len(), 2, "nothing deleted on its own");
+        assert_eq!(phone.playlist_names(), vec!["Set".to_string()]);
+        let held = held_from(&phone);
+        assert_eq!(held.len(), 1);
+        assert_eq!((held[0].device_uid.clone(), held[0].tracks, held[0].playlists), (pc.uid(), 1, 1));
+
+        // Steady while undecided: the phone doesn't push them back, the PC
+        // doesn't ask for them, and the question stays.
+        let r = sync_once(&phone, &pc).unwrap();
+        assert_eq!((r.received, r.sent), (0, 0));
+        assert_eq!(held_from(&phone).len(), 1);
+
+        std::thread::sleep(Duration::from_millis(5));
+        let (music, pcu) = (phone.music_dir(), pc.uid());
+        phone
+            .with_db(|c| Ok(crate::merge::resolve_pending(c, &music, &pcu, true)?))
+            .unwrap();
+        assert!(held_from(&phone).is_empty());
+        let r = sync_once(&phone, &pc).unwrap();
+        assert_eq!(r.sent, 1, "the deleted track goes back to the PC");
+        assert_eq!(pc.track_uids().len(), 2);
+        assert_eq!(pc.playlist_names(), vec!["Set".to_string()]);
+        assert_eq!(pc.order_in("Set").len(), 2);
+        // And it's settled: the PC dropped its stale tombstones.
+        let tombs: i64 = pc
+            .with_db(|c| Ok(c.query_row("SELECT COUNT(*) FROM tombstones", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(tombs, 0);
+        let r = sync_once(&phone, &pc).unwrap();
+        assert_eq!((r.received, r.sent, r.organized), (0, 0, 0));
+    }
+
+    /// Same, held on the side that serves (the PC initiates), and answered
+    /// "delete here too". A delete made while linked still applies on its own.
+    #[test]
+    fn held_deletes_can_be_confirmed_and_linked_deletes_still_apply() {
+        let pc = Device::new("held-pc");
+        let phone = Device::new("held-phone");
+        let t1 = pc.add_track("uno.flac", &audio(2048, 31), "One");
+        let t2 = pc.add_track("dos.flac", &audio(2048, 32), "Two");
+        pair(&pc, &phone);
+        sync_once(&pc, &phone).unwrap();
+
+        unpair(&pc, &phone);
+        pc.delete_track(&t1);
+        std::thread::sleep(Duration::from_millis(5));
+        pair(&pc, &phone);
+        pc.delete_track(&t2);
+        sync_once(&pc, &phone).unwrap();
+
+        assert_eq!(phone.track_uids(), vec![t1.clone()], "the linked delete applied");
+        assert_eq!(held_from(&phone)[0].tracks, 1);
+
+        let (music, pcu) = (phone.music_dir(), pc.uid());
+        phone
+            .with_db(|c| Ok(crate::merge::resolve_pending(c, &music, &pcu, false)?))
+            .unwrap();
+        assert!(phone.track_uids().is_empty());
+        assert!(held_from(&phone).is_empty());
+        let r = sync_once(&pc, &phone).unwrap();
+        assert_eq!((r.received, r.sent), (0, 0));
+    }
+
+    /// A device only hands on the playlists it has. The phone keeps only
+    /// "Set" out of the PC's two; linked afterwards to a brand-new PC, it
+    /// used to create "Party" there too — empty, from a PC the new one never
+    /// saw. And once the phone unlinks the PC that had "Party", nobody it's
+    /// linked to has it anymore: it goes from the phone as well.
+    #[test]
+    fn a_device_only_hands_on_the_playlists_it_holds() {
+        let pc = Device::new("held-pc");
+        let phone = Device::new("held-phone");
+        let new_pc = Device::new("held-new-pc");
+        let t1 = pc.add_track("set.flac", &audio(2048, 51), "FromSet");
+        let t2 = pc.add_track("party.flac", &audio(2048, 52), "FromParty");
+        let set = pc.playlist("Set", None);
+        let party = pc.playlist("Party", None);
+        pc.add_to_playlist(set, &[&t1]);
+        pc.add_to_playlist(party, &[&t2]);
+
+        let names = |d: &Device| -> Vec<String> {
+            let conn = d.db.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT name FROM playlists ORDER BY name").unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+
+        // The phone is selective with nothing marked yet: it learns both
+        // playlists (to choose from) and marks only "Set".
+        let phone_uid = phone.uid();
+        {
+            let conn = phone.db.lock().unwrap();
+            crate::scope::set_mode(&conn, &phone_uid, crate::scope::Mode::Selected).unwrap();
+        }
+        sync_once(&phone, &pc).unwrap();
+        {
+            let conn = phone.db.lock().unwrap();
+            let s: String = conn
+                .query_row("SELECT uid FROM playlists WHERE name = 'Set'", [], |r| r.get(0))
+                .unwrap();
+            crate::scope::set_playlist(&conn, &phone_uid, &s, true).unwrap();
+        }
+        sync_once(&phone, &pc).unwrap();
+        assert_eq!(names(&phone), vec!["Party", "Set"], "known, to choose from");
+
+        // A new PC, linked only to the phone.
+        sync_once(&new_pc, &phone).unwrap();
+        assert_eq!(names(&new_pc), vec!["Set"], "only what the phone holds");
+        sync_once(&phone, &new_pc).unwrap();
+        assert_eq!(names(&new_pc), vec!["Set"], "in either direction");
+
+        // The phone unlinks the first PC: nobody linked has "Party" now.
+        {
+            let conn = phone.db.lock().unwrap();
+            crate::pairing::forget_device(&conn, &pc.uid()).unwrap();
+            assert_eq!(crate::scope::prune_orphans(&conn).unwrap(), 1);
+        }
+        assert_eq!(names(&phone), vec!["Set"]);
+        // Locally, not as a deletion: the first PC keeps its playlist.
+        assert_eq!(names(&pc), vec!["Party", "Set"]);
     }
 
     /// The full cycle of selective sync, which is where music would most

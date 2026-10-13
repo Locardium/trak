@@ -15,16 +15,26 @@
 //!   concurrent removal, which is the right bias when what's at stake is
 //!   losing music from a set.
 //!
-//! - **Deletes: always applied**, and the file goes to the library trash,
-//!   not into the void. The tombstone is saved regardless: it's what
-//!   prevents giving back to the other side what it already removed.
+//! - **Deletes: the newest wins**, like everything else. A tombstone only
+//!   deletes what wasn't touched after it (`updated_at` for tracks and
+//!   playlists, `added_at` for memberships); something edited or re-added
+//!   later beats it, and the stale tombstone is dropped. That's also how
+//!   "keep" works after a held delete: bumping the clock makes the item win
+//!   on every device, whoever passes the tombstone along.
+//! - **Deletes made while not linked are held** (Beta 1 · 2.7). A tombstone
+//!   older than the pairing with the peer that sent it, for something that
+//!   still exists here, is not applied: it waits in `held_deletes` for
+//!   the user (delete here too, or keep and send it back). Re-linking is
+//!   like linking a new device; it doesn't replay what the other side
+//!   deleted in the meantime. Everything else is applied, and the file goes
+//!   to the library trash, not into the void.
 //!
 //!   Until Phase 6.4 there was a per-device policy to ignore or queue
-//!   them. It was removed because it couldn't deliver what it promised: it
-//!   filtered by who passed you the tombstone, not by who had deleted, so
-//!   with three devices a delete you rejected on the phone still got in
-//!   through the laptop. What actually protects you is the trash, which
-//!   filters nothing.
+//!   them. It was removed because it filtered by who passed you the
+//!   tombstone, so with three devices a delete you rejected on the phone
+//!   still got in through the laptop. The hold above doesn't have that
+//!   hole: rejecting means "keep", which bumps the clock, and a newer item
+//!   beats the same tombstone no matter which device passes it.
 
 use crate::manifest::{Manifest, Membership, PlaylistEntry, ScopeEntry, DeviceSync, TrackEntry, Tombstone};
 use rusqlite::{Connection, OptionalExtension};
@@ -58,6 +68,10 @@ pub struct Applied {
     /// Selective scope rows applied (Phase 5.7).
     #[serde(default)]
     pub scope: usize,
+    /// Deletions held for the user instead of applied (2.7). Not part of
+    /// `total()`: nothing changed here.
+    #[serde(default)]
+    pub held: usize,
 }
 
 impl Applied {
@@ -132,15 +146,26 @@ pub fn changes_for_peer(local: &Manifest, remote: &Manifest) -> Changes {
     }
 
     for p in &local.playlists {
-        if they.tombstones.contains_key(&("playlist", p.uid.as_str())) {
-            continue;
+        if let Some(deleted_at) = they.tombstones.get(&("playlist", p.uid.as_str())) {
+            if *deleted_at >= p.updated_at {
+                continue;
+            }
         }
         match they.playlists.get(p.uid.as_str()) {
             Some(r) if p.updated_at > r.updated_at => out.playlists.push(p.clone()),
-            None => out.playlists.push(p.clone()),
+            // Only what this side really has. One it merely knows about —
+            // outside its scope, learned from a third device — isn't created
+            // on the other side (see `PlaylistEntry::held`).
+            None if p.held => out.playlists.push(p.clone()),
             _ => {}
         }
     }
+    let held: std::collections::HashSet<&str> = local
+        .playlists
+        .iter()
+        .filter(|p| p.held)
+        .map(|p| p.uid.as_str())
+        .collect();
 
     // Memberships travel for two different reasons: because the other side
     // is missing the pair (union), or because the ORDER changed. Without
@@ -162,7 +187,14 @@ pub fn changes_for_peer(local: &Manifest, remote: &Manifest) -> Changes {
             }
         }
         match they.memberships.get(&key) {
-            None => out.memberships.push(m.clone()),
+            // Same rule: contents only for a playlist that exists over there
+            // or that this side holds and is creating over there.
+            None if held.contains(m.playlist_uid.as_str())
+                || they.playlists.contains_key(m.playlist_uid.as_str()) =>
+            {
+                out.memberships.push(m.clone())
+            }
+            None => {}
             // Order belongs to whoever touched the playlist most recently.
             // Memberships have no clock of their own; the playlist does.
             Some(r) if r.rank != m.rank => {
@@ -231,10 +263,16 @@ fn tombstone_at(conn: &Connection, entity: &str, uid: &str) -> Option<i64> {
 /// What protects against an accidental delete is the trash, which filters
 /// nothing and always works: the file goes to `trash` and stays
 /// there for 30 days.
+///
+/// `confirm_from`: the peer these changes come from, when this device has
+/// someone to ask (the app; the server has no screen and passes `None`).
+/// Its deletions from before the current pairing are held instead of
+/// applied — see the module doc and `pending_deletes`.
 pub fn apply(
     conn: &Connection,
     changes: &Changes,
     music_dir: &std::path::Path,
+    confirm_from: Option<&str>,
 ) -> rusqlite::Result<Applied> {
     let mut applied = Applied::default();
 
@@ -279,8 +317,16 @@ pub fn apply(
     // after its children; resolving the parent in a single pass would
     // leave dangling nodes.
     for p in &changes.playlists {
-        if has_tombstone(conn, "playlist", &p.uid) {
-            continue;
+        if let Some(deleted_at) = tombstone_at(conn, "playlist", &p.uid) {
+            if deleted_at >= p.updated_at {
+                continue;
+            }
+            // Touched after it was deleted here (kept on the other side):
+            // the delete is stale.
+            conn.execute(
+                "DELETE FROM tombstones WHERE entity = 'playlist' AND uid = ?1",
+                [&p.uid],
+            )?;
         }
         let existing: Option<(i64, i64)> = conn
             .query_row(
@@ -394,21 +440,235 @@ pub fn apply(
         }
     }
 
-    // --- Tombstones (Phase 5.6) -------------------------------------------
+    // --- Tombstones (Phase 5.6, 2.7) ----------------------------------------
     //
-    // Always saved, even when the policy doesn't delete: this is what
-    // prevents this device from giving back to the other side what it
-    // already deleted. Whether to apply them or not is a separate decision.
+    // Saved when they apply, or when there's nothing here to delete: this is
+    // what prevents this device from giving back to the other side what it
+    // already deleted. One that loses to a newer item isn't saved (it would
+    // travel on and lose everywhere else too); one that's held isn't saved
+    // until the user confirms it.
+    let linked_since = match confirm_from {
+        Some(peer) => paired_at(conn, peer)?,
+        None => None,
+    };
     for t in &changes.tombstones {
-        conn.execute(
-            "INSERT OR IGNORE INTO tombstones (entity, uid, deleted_at, device_uid)
-             VALUES (?1, ?2, ?3, '')",
-            rusqlite::params![t.entity, t.uid, t.deleted_at],
-        )?;
+        match target(conn, t)? {
+            Target::Newer => continue,
+            Target::Present => {
+                if let (Some(peer), Some(since)) = (confirm_from, linked_since) {
+                    if t.deleted_at < since {
+                        conn.execute(
+                            "INSERT OR REPLACE INTO held_deletes
+                                 (entity, uid, deleted_at, from_device)
+                             VALUES (?1, ?2, ?3, ?4)",
+                            rusqlite::params![t.entity, t.uid, t.deleted_at, peer],
+                        )?;
+                        applied.held += 1;
+                        continue;
+                    }
+                }
+            }
+            Target::Gone => {}
+        }
+        store_tombstone(conn, t)?;
         applied.deleted += apply_tombstone(conn, music_dir, t)?;
     }
 
     Ok(applied)
+}
+
+/// When this device paired with `peer` (the current pairing: re-linking
+/// overwrites it). `None` if it isn't a known device.
+fn paired_at(conn: &Connection, peer: &str) -> rusqlite::Result<Option<i64>> {
+    Ok(conn
+        .query_row("SELECT paired_at FROM devices WHERE uid = ?1", [peer], |r| {
+            r.get::<_, Option<i64>>(0)
+        })
+        .optional()?
+        .flatten())
+}
+
+/// What a tombstone would hit on this device.
+enum Target {
+    /// Nothing: not here, or already gone.
+    Gone,
+    /// Here, and not touched since the delete.
+    Present,
+    /// Here, and edited or re-added after the delete: it wins.
+    Newer,
+}
+
+fn target(conn: &Connection, t: &Tombstone) -> rusqlite::Result<Target> {
+    let stamp: Option<i64> = match t.entity.as_str() {
+        "track" => conn
+            .query_row("SELECT updated_at FROM tracks WHERE uid = ?1", [&t.uid], |r| r.get(0))
+            .optional()?,
+        "playlist" => conn
+            .query_row("SELECT updated_at FROM playlists WHERE uid = ?1", [&t.uid], |r| r.get(0))
+            .optional()?,
+        "playlist_track" => {
+            let Some((pl, tr)) = t.uid.split_once(':') else { return Ok(Target::Gone) };
+            conn.query_row(
+                "SELECT pt.added_at FROM playlist_tracks pt
+                 JOIN playlists p ON p.id = pt.playlist_id
+                 JOIN tracks t ON t.id = pt.track_id
+                 WHERE p.uid = ?1 AND t.uid = ?2",
+                rusqlite::params![pl, tr],
+                |r| r.get(0),
+            )
+            .optional()?
+        }
+        _ => None,
+    };
+    Ok(match stamp {
+        None => Target::Gone,
+        Some(at) if at > t.deleted_at => Target::Newer,
+        Some(_) => Target::Present,
+    })
+}
+
+fn store_tombstone(conn: &Connection, t: &Tombstone) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO tombstones (entity, uid, deleted_at, device_uid)
+         VALUES (?1, ?2, ?3, '')",
+        rusqlite::params![t.entity, t.uid, t.deleted_at],
+    )?;
+    // Applied (by this sync or through another device): no longer a question.
+    conn.execute(
+        "DELETE FROM held_deletes WHERE entity = ?1 AND uid = ?2",
+        rusqlite::params![t.entity, t.uid],
+    )?;
+    Ok(())
+}
+
+/// Deletions held for the user, per device that made them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingDeletes {
+    pub device_uid: String,
+    pub device_name: String,
+    pub tracks: usize,
+    pub playlists: usize,
+    /// Tracks taken out of a playlist (the track itself stays).
+    pub removals: usize,
+}
+
+fn held(conn: &Connection, from: Option<&str>) -> rusqlite::Result<Vec<Tombstone>> {
+    let mut stmt = conn.prepare(
+        "SELECT entity, uid, deleted_at FROM held_deletes
+         WHERE ?1 IS NULL OR from_device = ?1",
+    )?;
+    let rows = stmt.query_map([from], |r| {
+        Ok(Tombstone {
+            entity: r.get(0)?,
+            uid: r.get(1)?,
+            deleted_at: r.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Drops held deletions that are no longer a question: the item is gone
+/// (deleted by hand meanwhile) or was touched after the delete.
+fn prune_pending(conn: &Connection) -> rusqlite::Result<()> {
+    for t in held(conn, None)? {
+        if !matches!(target(conn, &t)?, Target::Present) {
+            conn.execute(
+                "DELETE FROM held_deletes WHERE entity = ?1 AND uid = ?2",
+                rusqlite::params![t.entity, t.uid],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub fn pending_deletes(conn: &Connection) -> rusqlite::Result<Vec<PendingDeletes>> {
+    prune_pending(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT p.from_device, COALESCE(d.name, ''), p.entity, COUNT(*)
+         FROM held_deletes p LEFT JOIN devices d ON d.uid = p.from_device
+         GROUP BY p.from_device, p.entity
+         ORDER BY p.from_device",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, i64>(3)? as usize,
+        ))
+    })?;
+    let mut out: Vec<PendingDeletes> = Vec::new();
+    for row in rows {
+        let (device, name, entity, n) = row?;
+        if out.last().map(|g| g.device_uid != device).unwrap_or(true) {
+            out.push(PendingDeletes {
+                device_uid: device,
+                device_name: name,
+                ..Default::default()
+            });
+        }
+        let g = out.last_mut().expect("pushed above");
+        match entity.as_str() {
+            "track" => g.tracks += n,
+            "playlist" => g.playlists += n,
+            "playlist_track" => g.removals += n,
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// The user's answer for the deletions `device` made while unlinked.
+///
+/// - `keep = false`: delete here too. The tombstones are saved and applied
+///   like any other (files to the trash).
+/// - `keep = true`: the items get a fresh clock, so on the next sync they
+///   beat the other side's tombstone and travel back to it — and to anyone
+///   else that applied the delete.
+///
+/// Returns how many items it touched.
+pub fn resolve_pending(
+    conn: &Connection,
+    music_dir: &std::path::Path,
+    device: &str,
+    keep: bool,
+) -> rusqlite::Result<usize> {
+    prune_pending(conn)?;
+    let now = crate::db::now_ms();
+    let mut n = 0;
+    for t in held(conn, Some(device))? {
+        if keep {
+            n += match t.entity.as_str() {
+                "track" => conn.execute(
+                    "UPDATE tracks SET updated_at = ?1 WHERE uid = ?2",
+                    rusqlite::params![now, t.uid],
+                )?,
+                "playlist" => conn.execute(
+                    "UPDATE playlists SET updated_at = ?1 WHERE uid = ?2",
+                    rusqlite::params![now, t.uid],
+                )?,
+                "playlist_track" => match t.uid.split_once(':') {
+                    Some((pl, tr)) => conn.execute(
+                        "UPDATE playlist_tracks SET added_at = ?1
+                         WHERE playlist_id = (SELECT id FROM playlists WHERE uid = ?2)
+                           AND track_id = (SELECT id FROM tracks WHERE uid = ?3)",
+                        rusqlite::params![now, pl, tr],
+                    )?,
+                    None => 0,
+                },
+                _ => 0,
+            };
+        } else {
+            store_tombstone(conn, &t)?;
+            n += apply_tombstone(conn, music_dir, &t)?;
+        }
+        conn.execute(
+            "DELETE FROM held_deletes WHERE entity = ?1 AND uid = ?2",
+            rusqlite::params![t.entity, t.uid],
+        )?;
+    }
+    Ok(n)
 }
 
 /// Applies a delete. Returns 1 if it deleted something, 0 if there was
@@ -526,6 +786,7 @@ mod tests {
             parent_uid: parent.map(|s| s.to_string()),
             rank: "V".into(),
             updated_at,
+            held: true,
         }
     }
 
@@ -537,7 +798,7 @@ mod tests {
             tracks: vec![entry("t1", "new", 500)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap().tracks, 1);
+        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nowhere"), None).unwrap().tracks, 1);
         let title: String = conn
             .query_row("SELECT title FROM tracks WHERE uid = 't1'", [], |r| r.get(0))
             .unwrap();
@@ -548,7 +809,7 @@ mod tests {
             tracks: vec![entry("t1", "previous", 200)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &old, std::path::Path::new("/nowhere")).unwrap().tracks, 0);
+        assert_eq!(apply(&conn, &old, std::path::Path::new("/nowhere"), None).unwrap().tracks, 0);
         let title: String = conn
             .query_row("SELECT title FROM tracks WHERE uid = 't1'", [], |r| r.get(0))
             .unwrap();
@@ -572,9 +833,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        let first = apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap();
+        let first = apply(&conn, &changes, std::path::Path::new("/nowhere"), None).unwrap();
         assert!(first.total() > 0);
-        let second = apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap();
+        let second = apply(&conn, &changes, std::path::Path::new("/nowhere"), None).unwrap();
         assert_eq!(second.total(), 0, "the second pass must not change anything");
     }
 
@@ -591,7 +852,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap();
+        apply(&conn, &changes, std::path::Path::new("/nowhere"), None).unwrap();
 
         let (child_parent, folder_id): (Option<i64>, i64) = (
             conn.query_row("SELECT parent_id FROM playlists WHERE uid = 'p1'", [], |r| r.get(0))
@@ -616,7 +877,7 @@ mod tests {
             playlists: vec![pl("p1", "Sets", None, 10)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap().playlists, 0);
+        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nowhere"), None).unwrap().playlists, 0);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM playlists", [], |r| r.get(0))
             .unwrap();
@@ -636,7 +897,7 @@ mod tests {
                 playlists: vec![pl("p1", "Sets", None, 10)],
                 ..Default::default()
             },
-            std::path::Path::new("/nowhere"))
+            std::path::Path::new("/nowhere"), None)
         .unwrap();
         let member = Changes {
             memberships: vec![Membership {
@@ -647,7 +908,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &member, std::path::Path::new("/nowhere")).unwrap().memberships, 1);
+        assert_eq!(apply(&conn, &member, std::path::Path::new("/nowhere"), None).unwrap().memberships, 1);
 
         // Removed here, with a record of it.
         conn.execute("DELETE FROM playlist_tracks", []).unwrap();
@@ -656,7 +917,7 @@ mod tests {
             [],
         )
         .unwrap();
-        assert_eq!(apply(&conn, &member, std::path::Path::new("/nowhere")).unwrap().memberships, 0, "must not come back");
+        assert_eq!(apply(&conn, &member, std::path::Path::new("/nowhere"), None).unwrap().memberships, 0, "must not come back");
     }
 
     /// A membership for a track that hasn't arrived yet is skipped without
@@ -674,7 +935,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let applied = apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap();
+        let applied = apply(&conn, &changes, std::path::Path::new("/nowhere"), None).unwrap();
         assert_eq!(applied.playlists, 1);
         assert_eq!(applied.memberships, 0);
     }
@@ -706,10 +967,10 @@ mod tests {
             ..Default::default()
         };
         let dir = std::path::Path::new("/nowhere");
-        apply(&conn, &changes, dir).unwrap();
+        apply(&conn, &changes, dir, None).unwrap();
         assert_eq!(count_of(&conn, "p1"), 2);
         // Every sync resends them: still two.
-        apply(&conn, &changes, dir).unwrap();
+        apply(&conn, &changes, dir, None).unwrap();
         assert_eq!(count_of(&conn, "p1"), 2);
 
         // Removed from the playlist on the other side.
@@ -717,7 +978,7 @@ mod tests {
             tombstones: vec![tomb("playlist_track", "p1:a")],
             ..Default::default()
         };
-        apply(&conn, &removal, dir).unwrap();
+        apply(&conn, &removal, dir, None).unwrap();
         assert_eq!(count_of(&conn, "p1"), 1);
 
         // Deleted everywhere.
@@ -725,7 +986,7 @@ mod tests {
             tombstones: vec![tomb("track", "b")],
             ..Default::default()
         };
-        apply(&conn, &gone, dir).unwrap();
+        apply(&conn, &gone, dir, None).unwrap();
         assert_eq!(count_of(&conn, "p1"), 0);
     }
 
@@ -738,7 +999,7 @@ mod tests {
             tracks: vec![entry("never-seen", "x", 10)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nowhere")).unwrap().tracks, 0);
+        assert_eq!(apply(&conn, &changes, std::path::Path::new("/nowhere"), None).unwrap().tracks, 0);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM tracks", [], |r| r.get(0))
             .unwrap();
@@ -785,7 +1046,7 @@ mod tests {
             tombstones: vec![tomb("track", "t1")],
             ..Default::default()
         };
-        let applied = apply(&conn, &changes, &music).unwrap();
+        let applied = apply(&conn, &changes, &music, None).unwrap();
 
         assert_eq!(applied.deleted, 1);
         let n: i64 = conn
@@ -834,7 +1095,7 @@ mod tests {
         assert!(changes_for_peer(&remote, &local).scopes.is_empty());
 
         let conn = mem();
-        let applied = apply(&conn, &out, std::path::Path::new("/nowhere")).unwrap();
+        let applied = apply(&conn, &out, std::path::Path::new("/nowhere"), None).unwrap();
         assert_eq!(applied.scope, 2);
         let s = crate::scope::get(&conn, "phone").unwrap();
         assert_eq!(s.mode, crate::scope::Mode::Selected);
@@ -861,7 +1122,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
-            &music)
+            &music, None)
         .unwrap();
 
         apply(
@@ -870,7 +1131,7 @@ mod tests {
                 tombstones: vec![tomb("playlist", "p1")],
                 ..Default::default()
             },
-            &music)
+            &music, None)
         .unwrap();
 
         let playlists: i64 = conn
@@ -902,7 +1163,7 @@ mod tests {
                 tombstones: vec![tomb("track", "t1")],
                 ..Default::default()
             },
-            &music)
+            &music, None)
         .unwrap();
 
         assert!(f.exists(), "the foreign file isn't touched");
@@ -970,7 +1231,7 @@ mod tests {
             ..Default::default()
         };
         let music = std::path::Path::new("/nowhere");
-        apply(&conn, &base, music).unwrap();
+        apply(&conn, &base, music, None).unwrap();
 
         let reorder = Changes {
             memberships: vec![Membership {
@@ -982,7 +1243,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            apply(&conn, &reorder, music)
+            apply(&conn, &reorder, music, None)
                 .unwrap()
                 .memberships,
             1
@@ -994,7 +1255,7 @@ mod tests {
 
         // And applying it again doesn't count as work.
         assert_eq!(
-            apply(&conn, &reorder, music)
+            apply(&conn, &reorder, music, None)
                 .unwrap()
                 .memberships,
             0
@@ -1036,7 +1297,7 @@ mod tests {
                 playlists: vec![pl("p1", "Sets", None, 10)],
                 ..Default::default()
             },
-            music)
+            music, None)
         .unwrap();
 
         // Removed a while ago...
@@ -1051,7 +1312,7 @@ mod tests {
             memberships: vec![member("V", 500)],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &re_add, music).unwrap().memberships, 1);
+        assert_eq!(apply(&conn, &re_add, music, None).unwrap().memberships, 1);
 
         // And the old tombstone gets cleared, so it doesn't get in the way again.
         assert!(!has_tombstone(&conn, "playlist_track", "p1:t1"));
@@ -1065,7 +1326,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &removal, music).unwrap().deleted, 1);
+        assert_eq!(apply(&conn, &removal, music, None).unwrap().deleted, 1);
     }
 
     /// And a delete that arrives stale can't remove something added later.
@@ -1081,7 +1342,7 @@ mod tests {
                 memberships: vec![member("V", 800)],
                 ..Default::default()
             },
-            music)
+            music, None)
         .unwrap();
 
         let stale = Changes {
@@ -1092,7 +1353,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(apply(&conn, &stale, music).unwrap().deleted, 0);
+        assert_eq!(apply(&conn, &stale, music, None).unwrap().deleted, 0);
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM playlist_tracks", [], |r| r.get(0))
             .unwrap();

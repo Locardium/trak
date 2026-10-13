@@ -9,10 +9,14 @@
 //!
 //! Two things scope deliberately does NOT do:
 //!
-//! - **It doesn't filter the data, it filters the view.** Playlists, order
-//!   and metadata always replicate in full; the only selective thing is the
-//!   audio files. Filtering the rows too would leave the device not knowing
-//!   what exists, and there'd be nothing to come back to.
+//! - **It doesn't filter what a device learns, it filters what it hands
+//!   on.** A selective device still receives every playlist of the devices
+//!   it's linked to — otherwise it wouldn't know what exists and the scope
+//!   editor would have nothing to offer. But it only passes on the ones it
+//!   holds (`PlaylistEntry::held`), and it drops the ones no linked device
+//!   holds anymore (`prune_orphans`). Before, a phone relayed every playlist
+//!   it had ever seen, and linking it to a new PC created there, empty, the
+//!   playlists of a PC it had already unlinked.
 //!
 //!   What does change is what's shown, and it depends on whether the file
 //!   is still there: out of scope **with** a file shows dimmed and can't be
@@ -147,6 +151,112 @@ pub fn expand(playlists: &[PlaylistEntry], selected: &HashSet<String>) -> HashSe
         }
     }
     out
+}
+
+/// Sets `held` on each playlist from this device's own scope: all of them,
+/// or the marked ones, what hangs off them, and the folders above them —
+/// without its folders a marked playlist would arrive loose, out of its tree.
+pub fn mark_held(playlists: &mut [PlaylistEntry], scope: &Scope) {
+    if scope.mode == Mode::All {
+        playlists.iter_mut().for_each(|p| p.held = true);
+        return;
+    }
+    let mut held = expand(playlists, &scope.selected);
+    let parent: HashMap<&str, &str> = playlists
+        .iter()
+        .filter_map(|p| p.parent_uid.as_deref().map(|pa| (p.uid.as_str(), pa)))
+        .collect();
+    let mut ancestors = Vec::new();
+    for uid in &held {
+        let mut at = uid.as_str();
+        // Bounded: a cycle in the tree can't hang this.
+        for _ in 0..playlists.len() {
+            let Some(up) = parent.get(at) else { break };
+            ancestors.push(up.to_string());
+            at = up;
+        }
+    }
+    held.extend(ancestors);
+    for p in playlists.iter_mut() {
+        p.held = held.contains(&p.uid);
+    }
+}
+
+/// Records which playlists a paired device has, from its manifest.
+///
+/// Local and never replicated: it's what lets a device that doesn't hold a
+/// playlist know whether anyone it's linked to still does (`prune_orphans`).
+pub fn note_sources(conn: &Connection, device_uid: &str, playlists: &[PlaylistEntry]) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM playlist_sources WHERE device_uid = ?1", [device_uid])?;
+    let mut stmt = conn.prepare(
+        "INSERT OR IGNORE INTO playlist_sources (playlist_uid, device_uid) VALUES (?1, ?2)",
+    )?;
+    for p in playlists.iter().filter(|p| p.held) {
+        stmt.execute(rusqlite::params![p.uid, device_uid])?;
+    }
+    Ok(())
+}
+
+/// Removes the playlists this device neither holds nor can get from any
+/// device it's linked to. Returns how many.
+///
+/// They were only ever a catalog of what others offer; once nobody linked
+/// offers them — the PC they came from was unlinked — they're entries
+/// pointing at nothing, and they'd still show up in the scope editor.
+///
+/// **Local only, no tombstone**: this isn't the user deleting a playlist,
+/// and a tombstone would travel and delete it for real everywhere else.
+/// Linking that PC again brings them back. A playlist with at least one
+/// track whose file is here is kept regardless: that's music on this device,
+/// whatever the scope says.
+pub fn prune_orphans(conn: &Connection) -> rusqlite::Result<usize> {
+    let me = crate::db::this_device_uid(conn)?;
+    let scope = get(conn, &me)?;
+    if scope.mode == Mode::All {
+        return Ok(0);
+    }
+    let mut playlists: Vec<PlaylistEntry> = {
+        let mut stmt = conn.prepare(
+            "SELECT p.uid, p.name, p.kind, parent.uid, p.rank, p.updated_at
+             FROM playlists p LEFT JOIN playlists parent ON parent.id = p.parent_id
+             WHERE p.uid IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PlaylistEntry {
+                uid: r.get(0)?,
+                name: r.get(1)?,
+                kind: r.get(2)?,
+                parent_uid: r.get(3)?,
+                rank: r.get(4)?,
+                updated_at: r.get(5)?,
+                held: false,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    mark_held(&mut playlists, &scope);
+    let mut orphan = conn.prepare(
+        "SELECT
+            NOT EXISTS (SELECT 1 FROM playlist_sources WHERE playlist_uid = ?1)
+            AND NOT EXISTS (SELECT 1 FROM playlist_tracks pt
+                            JOIN playlists p ON p.id = pt.playlist_id
+                            JOIN tracks t ON t.id = pt.track_id
+                            WHERE p.uid = ?1 AND t.local_state = 'present')",
+    )?;
+    let doomed: Vec<String> = playlists
+        .iter()
+        .filter(|p| !p.held)
+        .filter(|p| orphan.query_row([&p.uid], |r| r.get::<_, bool>(0)).unwrap_or(false))
+        .map(|p| p.uid.clone())
+        .collect();
+    // Children go with their folder (`ON DELETE CASCADE`), memberships too.
+    for uid in &doomed {
+        conn.execute("DELETE FROM playlists WHERE uid = ?1", [uid])?;
+    }
+    if !doomed.is_empty() {
+        log::info!("[scope] {} playlist(s) no linked device has anymore: removed here", doomed.len());
+    }
+    Ok(doomed.len())
 }
 
 /// Which tracks fall within scope. `None` means "all": that's different from
@@ -910,6 +1020,7 @@ mod tests {
             parent_uid: parent.map(String::from),
             rank: "V".into(),
             updated_at: 0,
+            held: true,
         }
     }
 

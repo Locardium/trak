@@ -152,6 +152,16 @@ CREATE TABLE IF NOT EXISTS app_settings (
 -- security rule, and can be edited from any device.
 -- ---------------------------------------------------------------------------
 
+-- Which paired device has each playlist, from its last manifest. Local,
+-- never replicated: it's how a device that doesn't hold a playlist itself
+-- (selective sync) knows whether anyone it's linked to still does — and
+-- drops it when nobody does (`scope::prune_orphans`).
+CREATE TABLE IF NOT EXISTS playlist_sources (
+    playlist_uid TEXT NOT NULL,
+    device_uid   TEXT NOT NULL,
+    PRIMARY KEY (playlist_uid, device_uid)
+);
+
 CREATE TABLE IF NOT EXISTS devices (
     uid          TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
@@ -171,7 +181,12 @@ CREATE TABLE IF NOT EXISTS devices (
     -- file server, which lives outside the LAN and therefore doesn't show up on
     -- mDNS. Devices on the local network leave this NULL — their address
     -- changes with DHCP, and the one that matters is the one they announce.
-    address      TEXT
+    address      TEXT,
+    -- Only on the server: hash of the pairing token this device used. When
+    -- the token in the config changes, devices paired with the old one are
+    -- unpaired on their next connection — changing it works like changing a
+    -- password.
+    token_hash   TEXT
 );
 
 -- Sync preferences for EACH device (including this one). Replicated, LWW
@@ -220,6 +235,17 @@ CREATE TABLE IF NOT EXISTS tombstones (
     uid        TEXT NOT NULL,   -- playlist_track: '<playlist_uid>:<track_uid>'
     deleted_at INTEGER NOT NULL,
     device_uid TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (entity, uid)
+);
+
+-- Deletions held for the user to decide (see `merge::apply`): a peer deleted
+-- something while it wasn't linked to this device, and it still exists here.
+-- Not in `tombstones` until confirmed, so it neither applies nor travels on.
+CREATE TABLE IF NOT EXISTS held_deletes (
+    entity      TEXT NOT NULL,
+    uid         TEXT NOT NULL,
+    deleted_at  INTEGER NOT NULL,
+    from_device TEXT NOT NULL,
     PRIMARY KEY (entity, uid)
 );
 
@@ -385,6 +411,8 @@ fn migrate(conn: &Connection) -> Result<()> {
         // so we don't have to compare everything on every app startup.
         ("devices", "watch_epoch INTEGER"),
         ("devices", "watch_rev INTEGER"),
+        // Changing the server's token revokes the pairings made with it.
+        ("devices", "token_hash TEXT"),
     ];
     // Phase 6.4: per-device deletion policy was removed. It filtered by
     // who handed you the tombstone rather than who had deleted it, so with

@@ -54,6 +54,7 @@ import RightPanel from './components/RightPanel';
 import Settings from './components/Settings';
 import Sync from './components/Sync';
 import PairingDialog from './components/PairingDialog';
+import HeldDeletesDialog from './components/HeldDeletesDialog';
 import SyncIndicator from './components/SyncIndicator';
 import { Modal, NamePrompt, Confirm } from './components/Modal';
 import { MenuItem } from './components/ContextMenu';
@@ -1553,6 +1554,12 @@ export default function App() {
 
       {/* After the other modals: the code has to sit on top of them. */}
       <PairingDialog onStatus={setStatus} />
+      <HeldDeletesDialog
+        onStatus={setStatus}
+        onLibraryChanged={() => {
+          void Promise.all([refreshLibrary(), refreshPlaylists(), refreshPlaylistTracks()]);
+        }}
+      />
       <SyncIndicator hidden={modal?.type === 'sync' || !!importProgress} />
 
       {status && (

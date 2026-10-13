@@ -34,6 +34,13 @@ Escribir para un Claude que no vio esta conversación: concreto, con rutas, sin 
   reescribe `applicationIdSuffix` en `build.gradle.kts` en cada corrida, no editarlo a mano. Nunca
   instalar un build debug sobre la release (firma distinta → habria que desinstalar → se borra la
   biblioteca del celu).
+- **Protocolo de sync versionado** (`crates/core/src/wire.rs`: `PROTOCOL`, `MIN_PROTOCOL`). Todo
+  cambio a lo que viaja (un `Msg`, un campo de `Manifest`/`Changes`/`Applied`, el orden de los
+  mensajes, el significado de un campo) sube `PROTOCOL`. Si un peer viejo ya no lo entiende,
+  también `MIN_PROTOCOL` = nuevo valor; si es aditivo (`serde(default)`, mensaje que sólo se manda
+  a quien lo conoce), sólo `PROTOCOL` y el lado nuevo lo gatea con `sess.peer_protocol >= N`.
+  El test `wire::tests::protocol_fingerprint` falla si cambia un mensaje sin bump: actualizar la
+  huella SÓLO después de subir la versión. Un update nunca puede romper en silencio.
 - Commits/push sólo cuando el usuario lo pida.
 
 ## Mapa rápido

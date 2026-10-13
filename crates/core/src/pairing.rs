@@ -180,6 +180,10 @@ pub fn devices_with_address(conn: &Connection) -> Vec<(String, String, String, S
 
 pub fn forget_device(conn: &Connection, uid: &str) -> Result<()> {
     conn.execute("DELETE FROM devices WHERE uid = ?1", [uid])?;
+    conn.execute("DELETE FROM playlist_sources WHERE device_uid = ?1", [uid])?;
+    // Its held deletes stop being a question: not linked, nothing applies.
+    // Linking again brings them back.
+    conn.execute("DELETE FROM held_deletes WHERE from_device = ?1", [uid])?;
     Ok(())
 }
 
@@ -200,6 +204,38 @@ pub fn log_key_mismatch(conn: &Connection, uid: &str, name: &str) {
         "INSERT INTO sync_log (ts, peer, kind, detail) VALUES (?1, ?2, 'key-mismatch', ?3)",
         rusqlite::params![db::now_ms(), uid, name],
     );
+}
+
+/// Records which token a device paired with (server only).
+///
+/// Only a hash is stored: the database is a copy of the token waiting to leak
+/// otherwise, and all that's needed later is "is it still the same one?".
+pub fn set_device_token(conn: &Connection, uid: &str, token: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE devices SET token_hash = ?1 WHERE uid = ?2",
+        rusqlite::params![token_hash(token), uid],
+    )?;
+    Ok(())
+}
+
+/// Was this device paired with the token the server has now?
+///
+/// A device with no recorded token (paired before tokens were tracked) counts
+/// as not: there's no way to know which one it used, and the safe answer to
+/// "can this one still get in?" is to have it pair again.
+pub fn token_still_valid(conn: &Connection, uid: &str, token: &str) -> bool {
+    let stored: Option<String> = conn
+        .query_row("SELECT token_hash FROM devices WHERE uid = ?1", [uid], |r| r.get(0))
+        .ok()
+        .flatten();
+    stored.is_some_and(|h| secret_eq(&h, &token_hash(token)))
+}
+
+fn token_hash(token: &str) -> String {
+    blake3::derive_key("sway pairing token v1", token.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +418,17 @@ mod tests {
         set_device_address(&conn, "srv-1", "home.example:7420").unwrap();
         forget_device(&conn, "srv-1").unwrap();
         assert!(devices_with_address(&conn).is_empty());
+    }
+
+    /// Changing the server's token revokes what was paired with the old one.
+    #[test]
+    fn a_new_token_invalidates_old_pairings() {
+        let conn = db();
+        store_device(&conn, "phone", "Phone", "android", b"k").unwrap();
+        assert!(!token_still_valid(&conn, "phone", "t1"), "no token recorded yet");
+        set_device_token(&conn, "phone", "t1").unwrap();
+        assert!(token_still_valid(&conn, "phone", "t1"));
+        assert!(!token_still_valid(&conn, "phone", "t2"));
     }
 
     #[test]

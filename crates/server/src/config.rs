@@ -130,7 +130,8 @@ retention_days = 90
 
 # What you type in the app to pair a device with this server. It replaces the
 # six-digit code, because there is no screen here to compare it on. Treat it
-# like a password. Changing it does NOT unpair what is already paired.
+# like a password. Changing it (and restarting) unpairs every device paired
+# with the old one: they have to pair again with the new token.
 pair_token = "{token}"
 "#
     )

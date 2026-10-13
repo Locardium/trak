@@ -85,6 +85,15 @@ pub struct PlaylistEntry {
     pub parent_uid: Option<String>,
     pub rank: String,
     pub updated_at: i64,
+    /// This device really has this playlist: it's in its scope (all of them,
+    /// or the marked ones and the folders above them). The rest are only
+    /// *known* — learned from another device and kept so the scope editor
+    /// can offer them — and those are never handed on to a device that
+    /// doesn't have them (`merge::changes_for_peer`). Before, a phone
+    /// relayed every playlist it had ever seen: linking it to a new PC
+    /// created there, empty, the playlists of a PC it was no longer even
+    /// linked to.
+    pub held: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,10 +231,10 @@ impl Plan {
     }
 }
 
-fn tombstone_keys(m: &Manifest) -> HashSet<(&str, &str)> {
+fn tombstone_keys(m: &Manifest) -> HashMap<(&str, &str), i64> {
     m.tombstones
         .iter()
-        .map(|t| (t.entity.as_str(), t.uid.as_str()))
+        .map(|t| ((t.entity.as_str(), t.uid.as_str()), t.deleted_at))
         .collect()
 }
 
@@ -341,10 +350,16 @@ pub fn plan(local: &Manifest, remote: &Manifest) -> Plan {
     // membership. Scanning the list on every lookup makes the sync
     // quadratic: with 20 thousand tracks and a handful of deletions that's
     // hundreds of millions of string comparisons, twice per run.
-    let local_tombs: HashSet<(&str, &str)> = tombstone_keys(local);
-    let remote_tombs: HashSet<(&str, &str)> = tombstone_keys(remote);
-    let tombstoned = |set: &HashSet<(&str, &str)>, entity: &str, uid: &str| {
-        set.contains(&(entity, uid))
+    let local_tombs = tombstone_keys(local);
+    let remote_tombs = tombstone_keys(remote);
+    let tombstoned = |set: &HashMap<(&str, &str), i64>, entity: &str, uid: &str| {
+        set.contains_key(&(entity, uid))
+    };
+    // A tombstone only beats what wasn't touched after it (see `merge`): a
+    // track or playlist kept on one side after the other deleted it travels
+    // back.
+    let deleted_after = |set: &HashMap<(&str, &str), i64>, entity: &str, uid: &str, at: i64| {
+        set.get(&(entity, uid)).is_some_and(|d| *d >= at)
     };
 
     p.unhashed = local.tracks.iter().filter(|t| t.hash.is_none()).count();
@@ -352,7 +367,7 @@ pub fn plan(local: &Manifest, remote: &Manifest) -> Plan {
     // --- Files ----------------------------------------------------------
     for t in remote.tracks.iter().filter(|t| t.present) {
         let Some(hash) = t.hash.as_deref() else { continue };
-        if local_hashes.contains(hash) || tombstoned(&local_tombs, "track", &t.uid) {
+        if local_hashes.contains(hash) || deleted_after(&local_tombs, "track", &t.uid, t.updated_at) {
             continue;
         }
         if let Some(l) = local_by_uid.get(t.uid.as_str()).filter(|l| l.present) {
@@ -385,7 +400,7 @@ pub fn plan(local: &Manifest, remote: &Manifest) -> Plan {
     }
     for t in local.tracks.iter().filter(|t| t.present) {
         let Some(hash) = t.hash.as_deref() else { continue };
-        if remote_hashes.contains(hash) || tombstoned(&remote_tombs, "track", &t.uid) {
+        if remote_hashes.contains(hash) || deleted_after(&remote_tombs, "track", &t.uid, t.updated_at) {
             continue;
         }
         // Mirror of the above, seen from the other side: nothing gets sent
@@ -429,12 +444,14 @@ pub fn plan(local: &Manifest, remote: &Manifest) -> Plan {
     p.pull_playlists = remote
         .playlists
         .iter()
-        .filter(|pl| !local_pl.contains(pl.uid.as_str()) && !tombstoned(&local_tombs, "playlist", &pl.uid))
+        .filter(|pl| pl.held)
+        .filter(|pl| !local_pl.contains(pl.uid.as_str()) && !deleted_after(&local_tombs, "playlist", &pl.uid, pl.updated_at))
         .count();
     p.push_playlists = local
         .playlists
         .iter()
-        .filter(|pl| !remote_pl.contains(pl.uid.as_str()) && !tombstoned(&remote_tombs, "playlist", &pl.uid))
+        .filter(|pl| pl.held)
+        .filter(|pl| !remote_pl.contains(pl.uid.as_str()) && !deleted_after(&remote_tombs, "playlist", &pl.uid, pl.updated_at))
         .count();
 
     // --- Memberships ---------------------------------------------------------
@@ -542,9 +559,12 @@ pub fn build(conn: &Connection) -> rusqlite::Result<Manifest> {
                 parent_uid: r.get(3)?,
                 rank: r.get(4)?,
                 updated_at: r.get(5)?,
+                held: true,
             })
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
+        let mut playlists = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        crate::scope::mark_held(&mut playlists, &crate::scope::get(conn, &device_uid)?);
+        playlists
     };
 
     let memberships = {
@@ -677,6 +697,7 @@ mod weight {
                     parent_uid: None,
                     rank: "aZk".into(),
                     updated_at: 1_755_000_000_000,
+                    held: true,
                 })
                 .collect(),
             // A track is usually in several playlists, and each membership
@@ -752,6 +773,7 @@ mod tests {
                 parent_uid: None,
                 rank: "V".into(),
                 updated_at: 0,
+                held: true,
             },
             PlaylistEntry {
                 uid: "y".into(),
@@ -760,6 +782,7 @@ mod tests {
                 parent_uid: None,
                 rank: "W".into(),
                 updated_at: 0,
+                held: true,
             },
         ];
         // The track only lives in the unmarked one.
@@ -974,6 +997,7 @@ mod tests {
             parent_uid: None,
             rank: "V".into(),
             updated_at: 0,
+            held: true,
         });
         remote.playlists.push(PlaylistEntry {
             uid: "there-only".into(),
@@ -982,6 +1006,7 @@ mod tests {
             parent_uid: None,
             rank: "V".into(),
             updated_at: 0,
+            held: true,
         });
         let p = plan(&local, &remote);
         assert_eq!(p.pull_playlists, 1);
@@ -1015,6 +1040,7 @@ mod tests {
             parent_uid: None,
             rank: "V".into(),
             updated_at: 0,
+            held: true,
         });
         remote.memberships.push(Membership {
             playlist_uid: "sets".into(),
@@ -1064,6 +1090,7 @@ mod tests {
             parent_uid: None,
             rank: "V".into(),
             updated_at: 0,
+            held: true,
         });
         remote.memberships.push(Membership {
             playlist_uid: "sets".into(),

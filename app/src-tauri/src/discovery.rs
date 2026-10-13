@@ -23,15 +23,45 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub const SERVICE_TYPE: &str = "_sway._tcp.local.";
 
-/// Protocol version. A peer announcing a different one is listed but marked
-/// incompatible: better not to offer syncing than to fail halfway through.
-pub const PROTO: &str = "1";
+/// What to tell the user when one of the two has to update (2.8), naming
+/// who. `their_app` is the other side's app version, when known.
+pub fn update_note(name: &str, platform: &str, peer_is_older: bool, their_app: &str) -> String {
+    let theirs = if their_app.is_empty() {
+        String::new()
+    } else {
+        format!(" ({their_app})")
+    };
+    if !peer_is_older {
+        format!("{name} runs a newer version of Sway{theirs} — update this app")
+    } else if platform == sway_core::pairing::PLATFORM_SERVER {
+        format!("{name} runs an older Sway Server{theirs} — update sway-server")
+    } else {
+        format!("{name} runs an older version of Sway{theirs} — update it there")
+    }
+}
+
+/// The protocol range a peer announces, checked against ours. Before 2.8
+/// there was only `proto` ("1"), and that's below every minimum since.
+fn announced_update(name: &str, platform: &str, proto: &str, min: &str) -> Option<String> {
+    let theirs: u32 = proto.parse().unwrap_or(0);
+    let their_min: u32 = min.parse().unwrap_or(theirs);
+    match sway_core::wire::compat(theirs, their_min) {
+        sway_core::wire::Compat::Ok => None,
+        c => Some(update_note(name, platform, c == sway_core::wire::Compat::PeerOlder, "")),
+    }
+}
+
 
 /// How often to check that peers are still reachable. A connect to the LAN
 /// is cheap; this is what makes grey show up in seconds instead of waiting
 /// for the mDNS TTL to expire.
 const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1200);
+/// How long after startup an absent paired device still shows as "checking"
+/// instead of "offline". mDNS needs a moment to hear the others; painting
+/// them grey and then green a few seconds later was the other half of
+/// Fase 2.2.
+const DISCOVERY_WINDOW: std::time::Duration = std::time::Duration::from_secs(6);
 /// How many probes between re-querying the network (6 x 10 s = 1 minute).
 const REBROWSE_EVERY: u32 = 6;
 
@@ -50,7 +80,6 @@ pub struct Peer {
     pub uid: String,
     pub name: String,
     pub platform: String,
-    pub proto: String,
     pub addrs: Vec<String>,
     pub port: u16,
     pub last_seen: i64,
@@ -58,17 +87,52 @@ pub struct Peer {
     /// Resolved on listing, not on discovery — otherwise pairing wouldn't
     /// show up until the next startup.
     pub paired: bool,
-    /// Visible on the network right now. Paired devices that aren't there
-    /// get listed anyway, greyed out: they're still your devices even if
-    /// the phone is off wifi.
+    /// Reachable right now, per the TCP probe or a standing connection.
+    /// Paired devices that aren't there get listed anyway, greyed out:
+    /// they're still your devices even if the phone is off wifi.
     pub online: bool,
+    /// Nobody has tried to reach it yet: just announced by mDNS, restored
+    /// from the DB, or the app just started. Shown as "checking", neither
+    /// green nor grey (Fase 2.2): a peer used to be born `online` straight
+    /// from the mDNS announcement, and the UI said "connected" before any
+    /// connection had been tried.
+    pub checking: bool,
+    /// The pairing no longer works and won't fix itself: the other side
+    /// answered with a different key, or rejected ours (Fase 2.3). Carries
+    /// the reason to show. Autosync and the watcher leave the device alone,
+    /// and the UI offers to forget it.
+    pub invalid: Option<String>,
+    /// One of the two has to update before they can sync (Fase 2.8): the
+    /// protocols are out of range. Says who, ready to show. From the mDNS
+    /// announcement, or from a session that failed on the version exchange.
+    /// Like `invalid`, autosync and the watcher leave the device alone.
+    pub update: Option<String>,
 }
 
-#[derive(Default)]
 pub struct Peers {
     by_uid: Mutex<HashMap<String, Peer>>,
     /// mDNS's removal event carries the fullname, not the uid.
     fullname_to_uid: Mutex<HashMap<String, String>>,
+    /// Broken pairings, by uid. Apart from `by_uid` because a paired device
+    /// that isn't on the network isn't in that map either, and it can still
+    /// be the broken one.
+    invalid: Mutex<HashMap<String, String>>,
+    /// Version mismatches seen when opening a session, by uid: the message
+    /// for `Peer::update`.
+    outdated: Mutex<HashMap<String, String>>,
+    born: std::time::Instant,
+}
+
+impl Default for Peers {
+    fn default() -> Self {
+        Peers {
+            by_uid: Mutex::default(),
+            fullname_to_uid: Mutex::default(),
+            invalid: Mutex::default(),
+            outdated: Mutex::default(),
+            born: std::time::Instant::now(),
+        }
+    }
 }
 
 /// What happened when recording an mDNS announcement.
@@ -76,13 +140,10 @@ struct Seen {
     /// Something changed that the user would see differently: needs a
     /// re-render.
     changed: bool,
-    /// Wasn't in the list: it just showed up on the network.
-    ///
-    /// Distinguished from `changed` because the TCP probe **cannot** detect
-    /// this: a discovered peer is born `online: true`, so the first
-    /// `set_online(uid, true)` sees no transition and the catch-up sync
-    /// never fired. Exactly the most common case: opening the app with the
-    /// other device already on.
+    /// Wasn't in the list, or was grey: it just showed up on the network and
+    /// has to be probed now. Being announced isn't being reachable, so it's
+    /// the probe that turns it green — and that transition is what triggers
+    /// the catch-up sync, same as for a device that came back.
     first_time: bool,
 }
 
@@ -106,23 +167,35 @@ impl Peers {
     pub fn merged_list(&self, conn: &rusqlite::Connection) -> Vec<Peer> {
         let mut out = self.list();
         let known = paired_devices(conn);
+        let invalid = self.invalid.lock().unwrap().clone();
+        let outdated = self.outdated.lock().unwrap().clone();
         for p in out.iter_mut() {
             p.paired = known.iter().any(|(uid, _, _, _)| uid == &p.uid);
+            p.invalid = invalid.get(&p.uid).cloned();
+            // What a session found beats the announcement: it's newer.
+            if let Some(note) = outdated.get(&p.uid) {
+                p.update = Some(note.clone());
+            }
         }
+        // Not heard from yet. Right after startup that's "still looking",
+        // not "off".
+        let settling = self.settling();
         for (uid, name, platform, last_seen) in known {
             if out.iter().any(|p| p.uid == uid) {
                 continue;
             }
             out.push(Peer {
+                invalid: invalid.get(&uid).cloned(),
+                update: outdated.get(&uid).cloned(),
                 uid,
                 name,
                 platform,
-                proto: PROTO.to_string(),
                 addrs: Vec::new(),
                 port: 0,
                 last_seen,
                 paired: true,
                 online: false,
+                checking: settling,
             });
         }
         // First the ones on the network; then alphabetical.
@@ -134,7 +207,9 @@ impl Peers {
         out
     }
 
-    fn upsert(&self, fullname: String, peer: Peer) -> Seen {
+    /// Records an announcement. What the probe learned is kept: an
+    /// announcement says where the peer is, not whether it answers.
+    fn upsert(&self, fullname: String, mut peer: Peer) -> Seen {
         self.fullname_to_uid
             .lock()
             .unwrap()
@@ -144,23 +219,80 @@ impl Peers {
         // only refresh isn't worth emitting: mDNS re-queries often and would
         // make the list re-render all the time.
         let seen = match map.get(&peer.uid) {
-            Some(old) => Seen {
-                changed: old.name != peer.name
-                    || old.addrs != peer.addrs
-                    || old.port != peer.port
-                    // Was grey: turning green again is visible.
-                    || !old.online,
-                // Announced again after being grey. For sync purposes that's
-                // the same as appearing for the first time — it could have
-                // been off for hours. This used to be covered by removing
-                // the peer, which made any reappearance go through the
-                // `None` branch.
-                first_time: !old.online,
-            },
-            None => Seen { changed: true, first_time: true },
+            Some(old) => {
+                peer.online = old.online;
+                peer.checking = old.checking;
+                Seen {
+                    changed: old.name != peer.name
+                        || old.addrs != peer.addrs
+                        || old.port != peer.port,
+                    // Announced again after being grey: probe it now. For
+                    // sync purposes that's the same as appearing for the
+                    // first time — it could have been off for hours.
+                    first_time: !old.online,
+                }
+            }
+            None => {
+                peer.online = false;
+                peer.checking = true;
+                Seen { changed: true, first_time: true }
+            }
         };
         map.insert(peer.uid.clone(), peer);
         seen
+    }
+
+    /// Still inside the startup window: absent paired devices are "checking".
+    fn settling(&self) -> bool {
+        self.born.elapsed() < DISCOVERY_WINDOW
+    }
+
+    /// Nothing left to hear about: the startup window passed and every
+    /// announced peer was probed at least once.
+    fn settled(&self) -> bool {
+        !self.settling() && !self.by_uid.lock().unwrap().values().any(|p| p.checking)
+    }
+
+    /// Records that the pairing with `uid` is broken. `true` if it wasn't
+    /// already: the caller logs it once, not on every retry.
+    pub fn set_invalid(&self, uid: &str, reason: &str) -> bool {
+        self.invalid
+            .lock()
+            .unwrap()
+            .insert(uid.to_string(), reason.to_string())
+            .is_none()
+    }
+
+    /// Records that `uid` speaks a protocol out of range (2.8). `true` if
+    /// it's news.
+    pub fn set_outdated(&self, uid: &str, note: &str) -> bool {
+        self.outdated
+            .lock()
+            .unwrap()
+            .insert(uid.to_string(), note.to_string())
+            .as_deref()
+            != Some(note)
+    }
+
+    /// Syncing with `uid` can't work until someone acts: the pairing is
+    /// broken, or one side has to update. Retrying won't fix either.
+    pub fn is_invalid(&self, uid: &str) -> bool {
+        self.invalid.lock().unwrap().contains_key(uid)
+            || self.outdated.lock().unwrap().contains_key(uid)
+            || self
+                .by_uid
+                .lock()
+                .unwrap()
+                .get(uid)
+                .is_some_and(|p| p.update.is_some())
+    }
+
+    /// Forgotten, paired again, or a session just worked: whatever was
+    /// wrong no longer applies.
+    pub fn clear_invalid(&self, uid: &str) -> bool {
+        let broken = self.invalid.lock().unwrap().remove(uid).is_some();
+        let outdated = self.outdated.lock().unwrap().remove(uid).is_some();
+        broken || outdated
     }
 
     /// `(uid, ip, port)` for each peer with a known address, to probe.
@@ -171,6 +303,10 @@ impl Peers {
             .values()
             .filter_map(|p| p.addrs.first().map(|a| (p.uid.clone(), a.clone(), p.port)))
             .collect()
+    }
+
+    fn probe_target(&self, uid: &str) -> Option<(String, String, u16)> {
+        self.probe_targets().into_iter().find(|(u, _, _)| u == uid)
     }
 
     /// Marks a peer unreachable after a failed connection attempt, without
@@ -187,6 +323,7 @@ impl Peers {
     /// that can't work: a server needs its token, and that button drives the
     /// local-network flow, which doesn't carry one.
     pub fn forget(&self, uid: &str) -> bool {
+        self.clear_invalid(uid);
         self.by_uid.lock().unwrap().remove(uid).is_some()
     }
 
@@ -206,7 +343,6 @@ impl Peers {
             uid: uid.to_string(),
             name: name.to_string(),
             platform: platform.to_string(),
-            proto: PROTO.to_string(),
             addrs: Vec::new(),
             port,
             last_seen: crate::db::now_ms(),
@@ -214,6 +350,9 @@ impl Peers {
             // Not known yet: the probe decides it. Being born `true` would
             // show a server as online when the connection wasn't even tried.
             online: false,
+            checking: true,
+            invalid: None,
+            update: None,
         });
         entry.addrs = vec![host.to_string()];
         entry.port = port;
@@ -221,11 +360,13 @@ impl Peers {
         entry.platform = platform.to_string();
     }
 
-    /// Returns `true` if the state changed (i.e. if there's something to show).
+    /// Returns `true` if the state changed (i.e. if there's something to
+    /// show). Any answer ends "checking", even a "no".
     pub(crate) fn set_online(&self, uid: &str, online: bool) -> bool {
         let mut map = self.by_uid.lock().unwrap();
         match map.get_mut(uid) {
-            Some(p) if p.online != online => {
+            Some(p) if p.online != online || p.checking => {
+                p.checking = false;
                 p.online = online;
                 if online {
                     p.last_seen = crate::db::now_ms();
@@ -290,7 +431,8 @@ pub fn start(
         ("uid".to_string(), uid.to_string()),
         ("name".to_string(), name.to_string()),
         ("platform".to_string(), platform_name()),
-        ("proto".to_string(), PROTO.to_string()),
+        ("proto".to_string(), sway_core::wire::PROTOCOL.to_string()),
+        ("minproto".to_string(), sway_core::wire::MIN_PROTOCOL.to_string()),
     ]);
     let info = ServiceInfo::new(
         SERVICE_TYPE,
@@ -363,18 +505,25 @@ fn spawn_browse_loop(handle: AppHandle, receiver: mdns_sd::Receiver<ServiceEvent
                         let n = get("name");
                         if n.is_empty() { peer_uid.clone() } else { n }
                     };
+                    let platform = get("platform");
+                    let update =
+                        announced_update(&name, &platform, &get("proto"), &get("minproto"));
                     let peer = Peer {
                         uid: peer_uid.clone(),
                         name,
-                        platform: get("platform"),
-                        proto: get("proto"),
+                        platform,
                         addrs,
                         port: info.port,
                         last_seen: crate::db::now_ms(),
                         // Resolved against the DB by `merged_list` on every
                         // read; caching them here would leave them stale.
                         paired: false,
-                        online: true,
+                        // Decided by `upsert`: an announcement isn't a
+                        // connection.
+                        online: false,
+                        checking: true,
+                        invalid: None,
+                        update,
                     };
                     let state = handle.state::<crate::AppState>();
                     let seen = state.peers.upsert(info.fullname.clone(), peer);
@@ -382,12 +531,15 @@ fn spawn_browse_loop(handle: AppHandle, receiver: mdns_sd::Receiver<ServiceEvent
                         log::info!("[mdns] peer visible: {}", info.fullname);
                         let _ = handle.emit("peers-changed", ());
                     }
-                    // Showed up on the network: catch up now. Without this
-                    // you'd have to wait for something to change here or for
-                    // the 10-minute safety net, and in practice people
-                    // ended up hitting "sync" by hand when opening the app.
+                    // Showed up on the network: probe it now, not in ten
+                    // seconds. Turning green is what triggers the catch-up
+                    // (see `apply_probe`); without it you'd have to wait for
+                    // something to change here or for the 10-minute safety
+                    // net, and in practice people ended up hitting "sync" by
+                    // hand when opening the app.
                     if seen.first_time {
-                        crate::autosync::peer_came_online(&handle, &peer_uid);
+                        let handle = handle.clone();
+                        std::thread::spawn(move || probe_uid(&handle, &peer_uid));
                     }
                 }
                 ServiceEvent::ServiceRemoved(_, fullname) => {
@@ -437,6 +589,14 @@ fn spawn_browse_loop(handle: AppHandle, receiver: mdns_sd::Receiver<ServiceEvent
 /// doesn't report it as an error.
 pub fn spawn_prober(handle: AppHandle) {
     std::thread::spawn(move || {
+        // Right away, not after the first interval: the restored server
+        // stays "checking" until someone tries it.
+        probe_once(&handle);
+        // Absent paired devices stop being "checking" when the window
+        // closes; nothing else would repaint them.
+        let born = handle.state::<crate::AppState>().peers.born;
+        std::thread::sleep(DISCOVERY_WINDOW.saturating_sub(born.elapsed()));
+        let _ = handle.emit("peers-changed", ());
         let mut tick: u32 = 0;
         loop {
             std::thread::sleep(PROBE_INTERVAL);
@@ -458,26 +618,78 @@ pub fn spawn_prober(handle: AppHandle) {
 
 /// One round of probing. Emits `peers-changed` only if some state changed.
 pub fn probe_once(handle: &AppHandle) {
+    probe_round(handle, false);
+}
+
+/// Same, including devices with a standing connection. For the Refresh
+/// button: the person asked for the truth now, not for what the connection
+/// last said.
+pub fn probe_all(handle: &AppHandle) {
+    probe_round(handle, true);
+}
+
+fn probe_round(handle: &AppHandle, all: bool) {
     let state = handle.state::<crate::AppState>();
-    let mut changed = false;
-    let mut came_online = Vec::new();
-    for (uid, ip, port) in state.peers.probe_targets() {
+    let results = state
+        .peers
+        .probe_targets()
+        .into_iter()
         // With a standing connection open (see `watch.rs`) there's nothing
         // to probe: that connection already proves the device is there, and
         // better than a connect, because it drops the moment it stops being
         // there. Probing it anyway would mean opening a socket every ten
         // seconds against a device we already have on the other end of the
         // phone.
-        if state.watchers.is_live(&uid) {
-            continue;
-        }
-        let reachable = match resolve(&ip, port) {
-            Some(addr) => std::net::TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok(),
-            None => false,
-        };
-        if state.peers.set_online(&uid, reachable) {
+        .filter(|(uid, _, _)| all || !state.watchers.is_live(uid))
+        .map(|(uid, ip, port)| {
+            // In parallel: one unreachable device costs its timeout, not the
+            // sum of all of them — the Refresh button waits for this.
+            std::thread::spawn(move || {
+                let ok = reachable(&ip, port);
+                (uid, ok)
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .filter_map(|t| t.join().ok())
+        .collect();
+    apply_probe(handle, results);
+}
+
+/// Probes a single peer, now. For one that was just announced: waiting for
+/// the next round left it "checking" for up to ten seconds.
+fn probe_uid(handle: &AppHandle, uid: &str) {
+    let state = handle.state::<crate::AppState>();
+    if state.watchers.is_live(uid) {
+        return;
+    }
+    // Announced without a usable address: nothing to try, and that's an
+    // answer too — left "checking", it would hold up `wait_settled` forever.
+    let ok = match state.peers.probe_target(uid) {
+        Some((_, ip, port)) => reachable(&ip, port),
+        None => false,
+    };
+    apply_probe(handle, vec![(uid.to_string(), ok)]);
+}
+
+fn reachable(ip: &str, port: u16) -> bool {
+    match resolve(ip, port) {
+        Some(addr) => std::net::TcpStream::connect_timeout(&addr, PROBE_TIMEOUT).is_ok(),
+        None => false,
+    }
+}
+
+/// Records what the probe found, repaints, and catches up with whoever just
+/// became reachable.
+fn apply_probe(handle: &AppHandle, results: Vec<(String, bool)>) {
+    let state = handle.state::<crate::AppState>();
+    let mut changed = false;
+    let mut came_online = Vec::new();
+    for (uid, ok) in results {
+        let was_online = state.peers.list().iter().any(|p| p.uid == uid && p.online);
+        if state.peers.set_online(&uid, ok) {
             changed = true;
-            if reachable {
+            if ok && !was_online {
                 came_online.push(uid);
             }
         }
@@ -494,6 +706,23 @@ pub fn probe_once(handle: &AppHandle) {
         // back that will ever arrive, because the server can't give any.
         state.watchers.wake(&uid);
         crate::autosync::peer_came_online(handle, &uid);
+    }
+}
+
+/// Waits (a few seconds at most) until discovery has had its say: the
+/// startup window passed and every announced peer was probed once.
+///
+/// For whoever needs to know which LAN devices are there before deciding
+/// something — the server catch-up, which has to go after the LAN (Fase
+/// 2.4). Asking at t=0 found no LAN peer yet and started pulling from the
+/// server while the PC was about to show up.
+pub fn wait_settled(handle: &AppHandle) {
+    const MAX: std::time::Duration = std::time::Duration::from_secs(12);
+    const POLL: std::time::Duration = std::time::Duration::from_millis(250);
+    let until = std::time::Instant::now() + MAX;
+    let state = handle.state::<crate::AppState>();
+    while !state.peers.settled() && std::time::Instant::now() < until {
+        std::thread::sleep(POLL);
     }
 }
 
@@ -555,14 +784,22 @@ mod tests {
                 uid: uid.into(),
                 name: name.into(),
                 platform: "windows".into(),
-                proto: PROTO.into(),
                 addrs: vec!["192.168.0.5".into()],
                 port: 1234,
                 last_seen: crate::db::now_ms(),
                 paired: false,
                 online: true,
+                checking: false,
+                invalid: None,
+                update: None,
             },
         )
+    }
+
+    /// Announced and then answered the probe.
+    fn reachable_peer(peers: &Peers, uid: &str, name: &str) {
+        seen(peers, uid, name);
+        peers.set_online(uid, true);
     }
 
     fn db_with_device(uid: &str, name: &str) -> rusqlite::Connection {
@@ -583,7 +820,7 @@ mod tests {
     #[test]
     fn pairing_shows_up_without_a_new_mdns_announcement() {
         let peers = Peers::default();
-        seen(&peers, "peer-1", "Phone");
+        reachable_peer(&peers, "peer-1", "Phone");
         let empty = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&empty).unwrap();
         assert!(!peers.merged_list(&empty)[0].paired);
@@ -616,7 +853,7 @@ mod tests {
     #[test]
     fn a_quiet_peer_stays_online() {
         let peers = Peers::default();
-        seen(&peers, "peer-1", "Phone");
+        reachable_peer(&peers, "peer-1", "Phone");
         {
             let mut map = peers.by_uid.lock().unwrap();
             map.get_mut("peer-1").unwrap().last_seen = crate::db::now_ms() - 60 * 60 * 1000;
@@ -636,7 +873,7 @@ mod tests {
     #[test]
     fn a_failed_connection_marks_the_peer_offline() {
         let peers = Peers::default();
-        seen(&peers, "peer-1", "Phone");
+        reachable_peer(&peers, "peer-1", "Phone");
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
         assert!(peers.merged_list(&conn)[0].online);
@@ -651,15 +888,64 @@ mod tests {
         assert!(peers.merged_list(&conn)[0].online);
     }
 
-    /// A discovered peer is born `online`, so the TCP probe sees no
-    /// transition and doesn't trigger the catch-up. Opening the app with the
-    /// other device already on — the most common case — used to go unsynced
-    /// until something changed or the 10-minute safety net passed, and in
-    /// practice people ended up syncing by hand.
+    /// An announcement isn't a connection (Fase 2.2): the peer is born
+    /// "checking", and it's the probe that turns it green or grey.
+    #[test]
+    fn an_announced_peer_is_checking_until_probed() {
+        let peers = Peers::default();
+        seen(&peers, "peer-1", "Phone");
+        let p = &peers.list()[0];
+        assert!(!p.online, "announced is not reachable");
+        assert!(p.checking);
+
+        // A "no" from the probe also ends the checking, and is visible.
+        assert!(peers.set_online("peer-1", false));
+        let p = &peers.list()[0];
+        assert!(!p.online && !p.checking);
+        assert!(!peers.set_online("peer-1", false), "nothing new the second time");
+    }
+
+    /// Re-announcing doesn't undo what the probe learned.
+    #[test]
+    fn a_reannouncement_keeps_the_probed_state() {
+        let peers = Peers::default();
+        reachable_peer(&peers, "peer-1", "Phone");
+        seen(&peers, "peer-1", "Phone");
+        assert!(peers.list()[0].online);
+        assert!(!peers.list()[0].checking);
+    }
+
+    /// Paired devices nobody has heard from yet are "checking" right after
+    /// startup, not "offline".
+    #[test]
+    fn absent_paired_devices_are_checking_at_startup() {
+        let peers = Peers::default();
+        let conn = db_with_device("saved", "PC");
+        assert!(peers.merged_list(&conn)[0].checking);
+        assert!(!peers.settled());
+    }
+
+    /// A broken pairing shows up on the device, whether it's on the network
+    /// or not, and forgetting it clears it.
+    #[test]
+    fn a_broken_pairing_is_listed_and_forgotten() {
+        let peers = Peers::default();
+        let conn = db_with_device("saved", "Server");
+        assert!(peers.set_invalid("saved", "key changed"));
+        assert!(!peers.set_invalid("saved", "key changed"), "only news once");
+        assert_eq!(peers.merged_list(&conn)[0].invalid.as_deref(), Some("key changed"));
+        peers.forget("saved");
+        assert!(!peers.is_invalid("saved"));
+        assert!(peers.merged_list(&conn)[0].invalid.is_none());
+    }
+
+    /// Showing up on the network means probing it; answering the probe is
+    /// what triggers the catch-up (see `apply_probe`).
     #[test]
     fn a_peer_that_appears_for_the_first_time_is_a_catch_up_trigger() {
         let peers = Peers::default();
         assert!(seen(&peers, "peer-1", "Phone").first_time);
+        peers.set_online("peer-1", true);
 
         // mDNS re-announces often and `refresh` re-asks every minute: that
         // can't count as an appearance or it would sync in a loop.
@@ -692,7 +978,7 @@ mod tests {
     #[test]
     fn a_peer_that_stops_announcing_goes_grey_but_stays_probed() {
         let peers = Peers::default();
-        seen(&peers, "peer-1", "Phone");
+        reachable_peer(&peers, "peer-1", "Phone");
 
         assert!(peers.mark_gone_by_fullname("peer-1._sway._tcp.local."));
         let list = peers.list();
@@ -712,18 +998,18 @@ mod tests {
         assert!(!peers.mark_gone_by_fullname("peer-1._sway._tcp.local."));
     }
 
-    /// A grey peer that re-announces has to count as a catch-up. This used
-    /// to be covered by removal: coming back would enter as unknown. Now it
-    /// stays in the map, so the transition has to be seen through `online`.
+    /// A grey peer that re-announces has to be probed again: it could have
+    /// been gone for hours, and answering is what triggers the catch-up.
     #[test]
     fn a_grey_peer_that_comes_back_is_a_catch_up_trigger() {
         let peers = Peers::default();
-        seen(&peers, "peer-1", "Phone");
+        reachable_peer(&peers, "peer-1", "Phone");
         peers.mark_gone_by_fullname("peer-1._sway._tcp.local.");
 
         let back = seen(&peers, "peer-1", "Phone");
         assert!(back.first_time, "was grey: could have been for hours");
-        assert!(back.changed, "and the UI has to paint it green");
+        assert!(!peers.list()[0].online, "still grey until the probe answers");
+        assert!(peers.set_online("peer-1", true), "and then the UI paints it green");
 
         // While green, an identical re-announcement is still nothing.
         let again = seen(&peers, "peer-1", "Phone");
@@ -735,7 +1021,7 @@ mod tests {
     #[test]
     fn online_peers_sort_first() {
         let peers = Peers::default();
-        seen(&peers, "zeta", "Zeta");
+        reachable_peer(&peers, "zeta", "Zeta");
         let conn = db_with_device("alfa", "Alfa");
         let names: Vec<String> = peers.merged_list(&conn).into_iter().map(|p| p.name).collect();
         assert_eq!(names, vec!["Zeta", "Alfa"]);

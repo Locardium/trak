@@ -30,7 +30,6 @@ import {
   storageStatus,
   syncFiles,
   syncHistory,
-  SYNC_PROTO,
   unpairDevice,
   type LogEntry,
   type PairingDone,
@@ -120,6 +119,20 @@ function TransferProgress({ p }: { p: SyncProgress }) {
       </div>
     </div>
   );
+}
+
+/// What a device's badge says. Broken first: it's the only state that asks
+/// the person to do something. Then "checking": nobody has tried to reach it
+/// yet, and saying online or offline would be a guess.
+function peerBadge(p: Peer, incompatible: boolean): { text: string; tone: string } {
+  if (p.paired && p.invalid) return { text: 'Pairing broken', tone: ' bad' };
+  if (incompatible) return { text: 'Update needed', tone: ' bad' };
+  if (p.checking) return { text: 'Checking…', tone: '' };
+  if (!p.online) {
+    return { text: p.platform === PLATFORM_SERVER ? 'Unreachable' : 'Offline', tone: '' };
+  }
+  if (p.paired) return { text: 'Paired', tone: ' ok' };
+  return { text: p.platform === PLATFORM_SERVER ? 'Needs token' : 'Not paired', tone: '' };
 }
 
 function directionLabel(direction: string): string {
@@ -329,6 +342,7 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
   const [serverHost, setServerHost] = useState('');
   const [serverPort, setServerPort] = useState('7420');
   const [serverToken, setServerToken] = useState('');
+  const tokenInput = useRef<HTMLInputElement>(null);
   const [addingServer, setAddingServer] = useState(false);
 
   /// Per-device summary for the list: direction and selection. Direction
@@ -508,7 +522,27 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
       onStatus(String(e));
     }
     reloadPeers();
-    setTimeout(() => setScanning(false), 1200);
+    setScanning(false);
+  }
+
+  /// A server that dropped us: the form below, filled in, waiting for the
+  /// new token.
+  function pairAgain(p: Peer) {
+    setServerHost(p.addrs[0] ?? '');
+    setServerPort(String(p.port || 7420));
+    setServerToken('');
+    tokenInput.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    tokenInput.current?.focus();
+  }
+
+  async function forget(p: Peer) {
+    try {
+      await unpairDevice(p.uid);
+      onStatus(`Removed ${p.name}`);
+      reloadPeers();
+    } catch (e) {
+      onStatus(String(e));
+    }
   }
 
   async function saveName() {
@@ -600,22 +634,32 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
                 {/* A server neither is nor isn't "on this network": it lives
                     outside and is reached by its address. */}
                 <span>
-                  {isServer
-                    ? openPeer.online
-                      ? 'Reachable'
-                      : 'Unreachable'
-                    : openPeer.online
-                      ? 'On this network'
-                      : 'Not on this network'}
+                  {openPeer.invalid
+                    ? 'Pairing broken'
+                    : openPeer.update
+                    ? 'Update needed'
+                    : openPeer.checking
+                      ? 'Checking…'
+                      : isServer
+                        ? openPeer.online
+                          ? 'Reachable'
+                          : 'Unreachable'
+                        : openPeer.online
+                          ? 'On this network'
+                          : 'Not on this network'}
                 </span>
                 <small>
-                  {isServer
-                    ? `Archive server · ${openPeer.addrs[0] ?? '?'}:${openPeer.port}`
-                    : `${openPeer.platform} · ${openPeer.paired ? 'Paired' : 'Not paired'}`}
+                  {openPeer.invalid
+                    ? `${openPeer.name}: ${openPeer.invalid}`
+                    : openPeer.update
+                    ? openPeer.update
+                    : isServer
+                      ? `Archive server · ${openPeer.addrs[0] ?? '?'}:${openPeer.port}`
+                      : `${openPeer.platform} · ${openPeer.paired ? 'Paired' : 'Not paired'}`}
                 </small>
               </div>
               <div className="set-control">
-                {openPeer.online && openPeer.paired && (
+                {openPeer.online && openPeer.paired && !openPeer.invalid && !openPeer.update && (
                   <>
                     <button
                       disabled={busy}
@@ -870,13 +914,22 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
           {peers.length > 0 && (
             <ul className="peer-list">
               {peers.map((p) => {
-                const incompatible = p.online && p.proto !== SYNC_PROTO;
+                const incompatible = !!p.update;
+                const badge = peerBadge(p, incompatible);
+                const broken = p.paired && p.invalid;
                 return (
-                  <li key={p.uid} className={'peer' + (p.online ? '' : ' offline')}>
+                  <li
+                    key={p.uid}
+                    className={'peer' + (p.online || p.checking || broken ? '' : ' offline')}
+                  >
                     <div className="set-label">
                       <span>{p.name}</span>
                       <small>
-                        {p.paired && summaries[p.uid]
+                        {broken
+                          ? p.invalid
+                          : incompatible
+                          ? p.update
+                          : p.paired && summaries[p.uid]
                           ? summaries[p.uid]
                           : // A server is never "on this network": it lives
                             // outside and is reached by its address, so
@@ -889,30 +942,28 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
                       </small>
                     </div>
                     <div className="set-control">
-                      <span className={'peer-badge' + (p.paired && p.online ? ' ok' : '')}>
-                        {!p.online
-                          ? p.platform === PLATFORM_SERVER
-                            ? 'Unreachable'
-                            : 'Offline'
-                          : incompatible
-                            ? 'Other version'
-                            : p.paired
-                              ? 'Paired'
-                              : 'Not paired'}
-                      </span>
-                      {p.paired ? (
+                      <span className={'peer-badge' + badge.tone}>{badge.text}</span>
+                      {broken ? (
+                        // Retrying can't fix it: the other side has another
+                        // key, or rejects ours. Forget, then pair again.
+                        <button className="danger-btn" onClick={() => forget(p)}>
+                          Forget
+                        </button>
+                      ) : p.paired ? (
                         <button onClick={() => setOpenUid(p.uid)}>
                           Settings <ChevronRight size={13} />
                         </button>
                       ) : p.platform === PLATFORM_SERVER ? (
                         // A server doesn't pair with the six-digit code: it
-                        // needs its token instead. Offering the usual button
-                        // would send it through the local-network flow,
-                        // which it doesn't support, and the server would
-                        // reply that the token is missing.
-                        <button disabled title="Add it again below, with its token">
-                          Needs token
-                        </button>
+                        // needs its token instead (it dropped us: its token
+                        // changed). The usual button would send it through
+                        // the local-network flow, which it doesn't support.
+                        <>
+                          <button className="primary" onClick={() => pairAgain(p)}>
+                            Pair again
+                          </button>
+                          <button onClick={() => forget(p)}>Remove</button>
+                        </>
                       ) : (
                         <button
                           disabled={!p.online || incompatible || busyPeer === p.uid}
@@ -1029,6 +1080,7 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
           <div className="set-row form">
             <input
               className="set-input"
+              ref={tokenInput}
               type="password"
               placeholder="pairing token"
               value={serverToken}
