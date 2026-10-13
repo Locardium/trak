@@ -282,37 +282,34 @@ fn store_device(handle: &AppHandle, uid: &str, name: &str, platform: &str, pubke
         // Only the app does this: the server shares `core_pair::store_device`
         // and is an archive, it takes everything.
         let me = db::this_device_uid(&conn)?;
+        let before = sway_core::scope::get(&conn, &me)?.mode;
         sway_core::scope::set_mode(&conn, &me, sway_core::scope::Mode::Selected)?;
         // What's already here is this device's own: it stays marked. Left
         // unmarked it would count as a playlist this device merely knows
         // about — not handed on, and dropped once no linked device has it
-        // (`scope::prune_orphans`).
-        let own: Vec<String> = conn
-            .prepare("SELECT uid FROM playlists WHERE uid IS NOT NULL")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        for uid in &own {
-            sway_core::scope::set_playlist(&conn, &me, uid, true)?;
+        // (`scope::prune_orphans`). A device re-linking that was already
+        // selective keeps exactly the marks it had.
+        if before == sway_core::scope::Mode::All {
+            let own: Vec<String> = conn
+                .prepare("SELECT uid FROM playlists WHERE uid IS NOT NULL")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for uid in &own {
+                sway_core::scope::set_playlist(&conn, &me, uid, true)?;
+            }
         }
         db::set_setting(&conn, SCOPE_PROMPT_KEY, "1")?;
     }
     Ok(())
 }
 
-/// Never linked to anything, and never made a scope choice. A device that
-/// already chose (a row in `device_sync`) keeps its choice on a new link.
+/// Linked to nothing right now. A link from there is a fresh start, like a
+/// new device, even if this one chose a scope in an earlier life: the user
+/// asked (2026-10-13) to be asked again on re-linking instead of silently
+/// keeping an old "everything".
 fn is_first_pairing(conn: &rusqlite::Connection) -> Result<bool> {
     let devices: i64 = conn.query_row("SELECT COUNT(*) FROM devices", [], |r| r.get(0))?;
-    if devices > 0 {
-        return Ok(false);
-    }
-    let me = db::this_device_uid(conn)?;
-    let chosen: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM device_sync WHERE device_uid = ?1",
-        [&me],
-        |r| r.get(0),
-    )?;
-    Ok(chosen == 0)
+    Ok(devices == 0)
 }
 
 fn library_counts(handle: &AppHandle) -> (i64, i64) {

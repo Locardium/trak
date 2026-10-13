@@ -12,15 +12,15 @@ aislado" y Fase 2). Fase 4 cerrada y commiteada 2026-09-29.
 `beta1-fase4`, `backup-pre-rewrite` y el stash viejo se borraron 2026-09-29 (ver LOG). El push
 lo hace el usuario.
 **Próximo paso (en este orden, actualizado 2026-10-13):**
-0. Probar 2.6, 2.7 y 2.8 en device (cómo, en cada ítem de la Fase 2 abajo). Antes de cada commit:
+0. Fase 2 completa y confirmada en device (2.1-2.12, 2026-10-13). Falta commitear 2.9, 2.10,
+   el contador del log del server y el test de 2.11 (sin commit). Antes de cada commit:
    `gen/android/app/build.gradle.kts` sale `w/mixed` por el CLI de Tauri → `git checkout`.
 1. Al probar: PC + celu + server con protocolo 2 (2.8 ya chequea: un build viejo sale como
    "Update needed"; la release instalada 1.0.0-1 no tiene chequeo y se actualiza a mano). Datos dev: PC dev en `<Music>\Sway Dev`, server dev con
    `pnpm server:dev` (corre en `target/server-dev/`: `config.toml`, `data/`, `music/` ahí).
 2. **Fase 5** (5.1 artefactos del release en `dist/<tag>/` + APK; 5.2 README del server en Linux).
-3. Pendiente de confirmación en uso real (hecho, el usuario no lo dijo explícito): 1.2/1.3/1.4
-   (lag y notificación de sync con pantalla apagada), 1.6 (botones en background largo), y 1.7
-   parte A tras matar el proceso. 1.7 parte B (reanudación Media3 con proceso muerto) en reserva.
+3. Fase 1 confirmada por el usuario 2026-10-13 (1.2-1.7). 1.7 parte B (reanudación Media3 con
+   proceso muerto) sigue en reserva.
 4. Fase 6 (rediseño de UI) se planea aparte después.
 
 **Todo lo de las fases 1-4 está commiteado en `master`** (ver LOG).
@@ -62,16 +62,16 @@ Leyenda: ⬜ pendiente · 🟡 en curso · ✅ hecho y verificado · 🧪 hecho,
 - ✅ 1.8 Primer vínculo sincroniza todo sin preguntar + cambiar la selección en medio del sync no
   lo frenaba (ver plan). Hecho 2026-09-25, sin probar en device. Incluye filtro de logs de
   decodificadores en Android (ruido GEOB/RVAD).
-- 🧪 1.2 Lag de la UI durante el sync (tick 25 ms, sync-progress sin throttle, recarga de librería, sweep R128)
-- 🧪 1.3 Sync se corta con la pantalla apagada — FGS dataSync + wakelock + WifiLock hecho 2026-09-25; antes: exención de optimización de batería
+- ✅ 1.2 (confirmado por el usuario 2026-10-13) Lag de la UI durante el sync (tick 25 ms, sync-progress sin throttle, recarga de librería, sweep R128)
+- ✅ 1.3 (confirmado por el usuario 2026-10-13) Sync se corta con la pantalla apagada — FGS dataSync + wakelock + WifiLock hecho 2026-09-25; antes: exención de optimización de batería
   🧪 instalada en el S24 el 2026-09-25 (falta que el usuario la active desde Settings y confirme
   que sigue apareciendo tras un reinicio), falta el foreground service dataSync + wakelock +
   WifiLock (ver plan)
-- 🧪 1.4 Transferencia rápida → lenta (hash dentro del lock de DB, library_changed por archivo, timeout 180 s)
+- ✅ 1.4 (confirmado por el usuario 2026-10-13) Transferencia rápida → lenta (hash dentro del lock de DB, library_changed por archivo, timeout 180 s)
 - ✅ 1.5 Volver a la app = estado perdido (restore desde plugin/checkpoint + cola y playlist en DB
   + configChanges). Confirmado por el usuario en 14 días de uso real; servicio en foreground con
   pausa sigue afuera (ver plan), no hizo falta hasta ahora.
-- 🧪 1.6 Botones de transporte mueren en background. Causa **confirmada** (exit-info): el proceso
+- ✅ 1.6 (confirmado por el usuario 2026-10-13) Botones de transporte mueren en background. Causa **confirmada** (exit-info): el proceso
   muere con la música pausada y al revivir solo queda el tema del checkpoint. El fallback nativo
   instalado el 2026-09-25 no arregla eso (casi nunca corre); el fix real es 1.7.
 - ✅ 1.7 (parte A; B en reserva) Cola de reproducción nativa + reanudación tras muerte del proceso. **Parte A hecha; el
@@ -102,7 +102,7 @@ Leyenda: ⬜ pendiente · 🟡 en curso · ✅ hecho y verificado · 🧪 hecho,
   quedaban en el celu tras desvincular al único que las tenía. Fix: `held` en el manifest +
   poda local de huérfanas (ver LOG). El usuario confirmó 2026-10-13 que marcar A/B y desvincular
   anda bien.
-- 🧪 2.7 (reportado 2026-10-13, hecho 2026-10-13, tests ok, falta probar en device) Re-vincular
+- ✅ 2.7 (reportado y hecho 2026-10-13, confirmado por el usuario en device 2026-10-13) Re-vincular
   aplicaba borrados hechos mientras estaban desvinculados. Causa: `changes_for_peer` manda todos
   los tombstones y `merge::apply` los aplicaba todos, sin mirar `devices.paired_at`; además un
   tombstone le ganaba siempre a tracks/playlists (no había forma de "mantener"). Fix: tombstone
@@ -112,7 +112,7 @@ Leyenda: ⬜ pendiente · 🟡 en curso · ✅ hecho y verificado · 🧪 hecho,
   ítem vuelve al otro. Server no pregunta (aplica como antes). Detalle en LOG. Probar: repro del
   usuario (PC borra A/B + temas con el celu desvinculado, re-vincular → diálogo en el celu, nada
   borrado; "Keep" → vuelven a la PC; repetir con "Delete" → papelera).
-- 🧪 2.8 (hecho 2026-10-13, tests ok, falta probar entre devices) Versión de protocolo en core.
+- ✅ 2.8 (hecho 2026-10-13, confirmado por el usuario entre devices 2026-10-13: badge "Update needed" y log del server) Versión de protocolo en core.
   `wire::PROTOCOL = 2`, `MIN_PROTOCOL = 2`, frame `Version` dentro de `Session::connect/accept`,
   error tipado `VersionMismatch`, badge "Update needed" + mensaje con quién, log del server, test
   `protocol_fingerprint`, regla en `CLAUDE.md`. Detalle en LOG. Diseño acordado (referencia):
@@ -127,7 +127,32 @@ Leyenda: ⬜ pendiente · 🟡 en curso · ✅ hecho y verificado · 🧪 hecho,
   MIN_PROTOCOL if it breaks), then update the fingerprint") + regla en `CLAUDE.md`. Reemplaza
   el `PROTO = "1"` de mDNS (`discovery.rs`, `SYNC_PROTO` en `api.ts`). Lo de la Fase 2 sale como
   protocolo 2 / mínimo 2: la release instalada (1.0.0-1, sin chequeo) se actualiza a mano una vez.
-- 🧪 2.6 (hallado 2026-09-29, hecho 2026-10-13, tests ok) Server recibía el mismo archivo de dos
+- ✅ 2.9 (reportado 2026-10-13, confirmado por el usuario 2026-10-13) En modo Selected, un tema agregado a una playlist
+  quedaba gris hasta recargar: al agregar/sacar de una playlist `App.tsx` no recargaba la
+  librería (de ahí sale `inScope`). Ahora sí (`onDropTracks`, modal "Add to playlist",
+  `doRemoveFromPlaylist`). Probar: celu en Selected, playlist nueva, cargar tema, meterlo → color
+  normal al toque.
+- ✅ 2.10 (pedido 2026-10-13, confirmado por el usuario 2026-10-13) Re-vincular sin ningún device vinculado vuelve a
+  preguntar "What should this device sync?" (antes sólo la primera vez en la vida del device; un
+  device que ya había elegido Everything quedaba en Everything sin preguntar). Si ya estaba en
+  Selected conserva sus marcas. La pregunta ahora es un diálogo en primer plano
+  (`ScopePromptDialog`, a nivel App como el de Keep), ya no una fila dentro de Sync. Respuesta a
+  la duda del usuario: al desvincular el último device NO se pasa a Everything (sin vínculos el
+  scope no hace nada); se pregunta de nuevo al próximo vínculo.
+- ✅ 2.12 (cerrado 2026-10-13: el usuario lo atribuye al modo dev; reabrir si pasa en release) En el celu Dev, tras importar un WAV de 114 MB con el
+  selector del sistema mientras PC y server sincronizaban, la pantalla quedó negra ~4 s y la
+  página se recargó (19:39:58 → 19:40:03). NO fue crash del proceso (mismo PID 2985 antes y
+  después; Rust siguió sincronizando). Es una recarga del WebView: "[vite] connecting…" + "Couldn't
+  find callback id" (respuestas de Rust a la página vieja). Logcat no muestra muerte del renderer,
+  ni lmkd, ni cambio de archivos en `app/`, ni re-optimización de deps de Vite. Sospecha: algo
+  del modo dev (servidor Vite / HMR). Siguiente paso: mirar la terminal de `pnpm dev:android` a
+  esa hora (¿"page reload"/"server connection lost"?) y ver si pasa con un build release.
+- ✅ 2.11 (cerrado 2026-10-13: no se repitió; era la playlist abierta en el panel izquierdo, no el tilde de Sync) "Keep me deselecciona la playlist que estaba
+  seleccionada". En core NO pasa: test `keep_on_a_selective_phone_keeps_the_playlist_marked`
+  (celu Selected, A marcada, PC borra A desvinculado, re-vincular, Keep → A sigue marcada) pasa.
+  Falta aclarar con el usuario: ¿"seleccionada" = marcada en Sync o abierta en el sidebar? ¿en
+  qué device? Posible relación con 2.10 (antes del cambio, re-vincular no tocaba el scope).
+- ✅ 2.6 (hallado 2026-09-29, hecho 2026-10-13, confirmado en device 2026-10-13: log "not needed (another device is sending it)", una sola copia) Server recibía el mismo archivo de dos
   devices a la vez: doble subida y colisión del `.part`. Fix: `Msg::BlobPushAck { wanted }`
   antes de los bytes (no si ya lo tiene o si otra sesión lo está recibiendo, `claim_push`) +
   partial de push propio `<hash>.push.part`. Entra en el protocolo 2 (sin release todavía).

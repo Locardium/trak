@@ -19,8 +19,6 @@ import {
   type Conditions,
   type SyncLimits,
   refreshPeers,
-  resolveScopePrompt,
-  scopePromptPending,
   setAutoSyncP2p,
   setDeviceName,
   setScopeDirection,
@@ -323,10 +321,6 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
   const [progress, setProgress] = useState<Record<string, SyncProgress>>({});
   const [storage, setStorage] = useState<Storage | null>(null);
   const [myScope, setMyScope] = useState<Scope>({ mode: 'all', direction: 'both', selected: [] });
-  /// First link: this device hasn't said yet what it wants (see
-  /// `resolveScopePrompt`). Its scope already reads "selected, nothing
-  /// marked" meanwhile, so nothing but playlists is coming in.
-  const [scopePrompt, setScopePrompt] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [freeing, setFreeing] = useState(false);
 
@@ -361,31 +355,13 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
 
   const reloadPeers = useCallback(() => {
     listPeers().then(setPeers).catch(() => {});
-    // Every pairing ends up reloading the list, so this is where a first
-    // link shows its question. The scope changed under us too (to
-    // "selected"), so it's read again.
-    scopePromptPending()
-      .then((pending) => {
-        setScopePrompt(pending);
-        if (pending) {
-          return deviceIdentity()
-            .then(([uid]) => getScope(uid))
-            .then(setMyScope);
-        }
-      })
+    // A link (or the answer to "what should this device sync?", asked by
+    // ScopePromptDialog in App) can change this device's scope under us.
+    deviceIdentity()
+      .then(([uid]) => getScope(uid))
+      .then(setMyScope)
       .catch(() => {});
   }, []);
-
-  async function answerScopePrompt(everything: boolean) {
-    try {
-      await resolveScopePrompt(everything);
-      setScopePrompt(false);
-      if (myUid) setMyScope(await getScope(myUid));
-      onStatus(everything ? 'Syncing the whole library' : 'Tick the playlists to sync on this device');
-    } catch (e) {
-      onStatus(String(e));
-    }
-  }
 
   /// Storage state is recalculated by walking the library, so it can't run
   /// once per `library-changed`: during a sync those arrive in bunches and
@@ -814,21 +790,6 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
       <div className="settings">
         <section>
           <h4>This device</h4>
-          {scopePrompt && (
-            <div className="set-row scope-prompt">
-              <div className="set-label">
-                <span>What should this device sync?</span>
-                <small>
-                  Playlists from the linked device are coming in now. No music is downloaded until
-                  you choose.
-                </small>
-              </div>
-              <div className="scope-prompt-actions">
-                <button onClick={() => answerScopePrompt(true)}>Everything</button>
-                <button onClick={() => answerScopePrompt(false)}>Choose playlists</button>
-              </div>
-            </div>
-          )}
           <div className="set-row">
             <div className="set-label">
               <span>Name</span>

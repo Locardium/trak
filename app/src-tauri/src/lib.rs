@@ -1290,6 +1290,9 @@ fn resolve_scope_prompt(
     if everything {
         after_scope_change(&app, &me);
     }
+    // The question lives in App (ScopePromptDialog); an open Sync screen
+    // re-reads this device's scope on this event.
+    let _ = app.emit("peers-changed", ());
     Ok(())
 }
 

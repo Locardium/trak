@@ -915,14 +915,6 @@ table.tracks th.col-drop-after { box-shadow: inset -2px 0 0 var(--accent); }
 .set-row:last-child { border-bottom: 0; }
 /* First link of a device: the one question that holds back every file until
    it's answered, so it stands out from the settings around it. */
-.scope-prompt {
-  border: 1px solid var(--accent-dim);
-  border-radius: 8px;
-  padding: var(--space-sm) var(--space-md);
-  margin-bottom: var(--space-sm);
-}
-.scope-prompt .set-label > span { color: var(--accent); }
-.scope-prompt-actions { display: flex; gap: var(--space-sm); flex-wrap: wrap; justify-content: flex-end; }
 /* Rows that are a form rather than a labelled setting: the fields sit next
    to each other and the action closes the row, instead of a field being
    flung to the far side of the control track.

@@ -111,7 +111,8 @@ impl Host for ServerHost {
             log::info!(
                 "[sync] {} {}/{}: {}",
                 if p.sending { "sending" } else { "receiving" },
-                p.index + 1,
+                // Already 1-based: the sender counts from 1 (`engine::sync`).
+                p.index,
                 p.total_files,
                 p.filename
             );

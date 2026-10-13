@@ -55,6 +55,7 @@ import Settings from './components/Settings';
 import Sync from './components/Sync';
 import PairingDialog from './components/PairingDialog';
 import HeldDeletesDialog from './components/HeldDeletesDialog';
+import ScopePromptDialog from './components/ScopePromptDialog';
 import SyncIndicator from './components/SyncIndicator';
 import { Modal, NamePrompt, Confirm } from './components/Modal';
 import { MenuItem } from './components/ContextMenu';
@@ -1173,7 +1174,7 @@ export default function App() {
   async function onDropTracks(playlistId: number, trackIds: number[]) {
     const n = await addTracksToPlaylist(playlistId, trackIds);
     setStatus(n > 0 ? `Added ${n}.` : 'Already in the playlist.');
-    await Promise.all([refreshPlaylists(), refreshPlaylistTracks()]);
+    await Promise.all([refreshLibrary(), refreshPlaylists(), refreshPlaylistTracks()]);
     syncXmlAfterChange().catch(() => {});
   }
 
@@ -1188,7 +1189,7 @@ export default function App() {
     if (selection.type !== 'playlist') return;
     await removeTracksFromPlaylist(selection.id, trackIds);
     setSelected(new Set());
-    await Promise.all([refreshPlaylists(), refreshPlaylistTracks()]);
+    await Promise.all([refreshLibrary(), refreshPlaylists(), refreshPlaylistTracks()]);
     syncXmlAfterChange().catch(() => {});
   }
 
@@ -1489,7 +1490,7 @@ export default function App() {
                   onClick={async () => {
                     const n = await addTracksToPlaylist(p.id, modal.ids);
                     setStatus(n > 0 ? `Added ${n}.` : 'Already in the playlist.');
-                    await Promise.all([refreshPlaylists(), refreshPlaylistTracks()]);
+                    await Promise.all([refreshLibrary(), refreshPlaylists(), refreshPlaylistTracks()]);
                     syncXmlAfterChange().catch(() => {});
                     setModal(null);
                   }}
@@ -1554,6 +1555,7 @@ export default function App() {
 
       {/* After the other modals: the code has to sit on top of them. */}
       <PairingDialog onStatus={setStatus} />
+      <ScopePromptDialog onStatus={setStatus} onChoose={() => setModal({ type: 'sync' })} />
       <HeldDeletesDialog
         onStatus={setStatus}
         onLibraryChanged={() => {

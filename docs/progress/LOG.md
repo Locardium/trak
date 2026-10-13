@@ -5,6 +5,68 @@
 
 ---
 
+## 2026-10-13 · Fase 2 cerrada en device
+
+- Usuario: 2.8 "listo perfecto" (badge "Update needed" + línea en el log del server). 2.11 no
+  se repitió; "seleccionada" era la playlist abierta en el panel izquierdo (no el tilde de Sync):
+  cerrado. 2.12 lo atribuye al modo dev (Vite): cerrado, reabrir si pasa en un build release.
+- Queda sin commit: 2.9, 2.10, contador del log del server (`host.rs`), test de 2.11, docs.
+
+## 2026-10-13 · 2.6 confirmado + recarga del WebView en el celu (2.12)
+
+- 2.6 confirmado en device: celu y PC Dev subiendo el mismo WAV (113.909.850 bytes) al server
+  dev → log del server `not needed (another device is sending it)`, un solo `done`.
+- 2.12 (nuevo, sin causa): en el celu, tras elegir el WAV con el photopicker, pantalla negra ~4 s
+  y la página se recargó. Investigado con `adb logcat -d -v time` (S24 en `192.168.0.6:5555`):
+  el proceso `com.locardium.sway.dev` (PID 2985) no murió; el último frame del WebView es
+  19:39:58.8 y a las 19:40:03.1 aparece `[vite] connecting...` (carga nueva de la página),
+  después muchos `[TAURI] Couldn't find callback id …`. No hay `chromium`/renderer crash, ni
+  `lmkd`/kill, ni archivos de `app/` modificados, ni re-optimización de Vite
+  (`node_modules/.vite/deps/_metadata.json` de agosto, mismo `browserHash`). No hay
+  `location.reload` en el front. Pendiente: terminal de `pnpm dev:android` a esa hora, y probar
+  con release.
+- Hallazgo menor en el mismo log: la PC le empujó al celu el mismo WAV que el celu acababa de
+  importar (19:39:57 `received … 113909850 bytes` en el celu): el celu todavía no tenía el hash
+  calculado de su copia (otro uid), así que el plan no lo reconoció. `insert_received` lo
+  deduplica (borra la copia redundante); es tráfico desperdiciado, no un error. Sin tocar.
+
+## 2026-10-13 · Confirmaciones del usuario en device
+
+- Confirmados: 2.7 (Keep/Delete al re-vincular), 2.9 (tema gris), 2.10 (pregunta de scope al
+  re-vincular, cartel en primer plano). También dice que 1.2-1.7 ya estaban confirmados (STATUS
+  los tenía en 🧪): marcados ✅.
+- Pendiente: probar 2.8 y 2.6 (se le pasaron pasos), aclarar 2.11. 2.9/2.10 siguen sin commit.
+- Log del server dev con protocolo 2 anda (`protocol 2 (accepts 2+)`, sync PC dev → server ok).
+  Bug cosmético encontrado ahí: el server logueaba "receiving 2/3 … 4/3" porque
+  `crates/server/src/host.rs progress` sumaba `+ 1` a un `index` que ya es 1-based (el que
+  manda hace `index += 1` antes de usarlo). Corregido, sin commit.
+- 2.8 A: en la ventana de la release (1.0.0-1) la Dev sale "Other version" con Pair
+  deshabilitado: es el comportamiento VIEJO (ese texto ya no existe en el código nuevo); el
+  badge nuevo "Update needed" se ve en la ventana Sway Dev.
+
+## 2026-10-13 · Reportes nuevos tras la Fase 2: 2.9, 2.10, 2.11 (sin commit)
+
+- 2.9 tema gris en modo Selected: `inScope` de cada tema viene de `list_tracks` (librería) y
+  agregar/sacar de una playlist sólo recargaba playlists + temas de la playlist. `App.tsx`: los
+  tres caminos (`onDropTracks`, modal de agregar, `doRemoveFromPlaylist`) ahora también
+  `refreshLibrary()`.
+- 2.10 prompt de scope al re-vincular: `app pairing.rs is_first_pairing` = "no hay ningún device
+  en `devices`" (antes además exigía que este device nunca hubiera elegido scope). En
+  `store_device`, si el modo previo era All marca todas las playlists propias (como antes); si ya
+  era Selected deja sus marcas. UI: componente nuevo `components/ScopePromptDialog.tsx` en
+  `App.tsx` (escucha `pairing-done`/`peers-changed`, "Choose playlists" abre Sync); se sacó la
+  fila `scope-prompt` de `Sync.tsx` y su CSS. `lib.rs resolve_scope_prompt` emite
+  `peers-changed` para que un Sync abierto relea el scope.
+- 2.11 "Keep deselecciona la playlist": no reproduce en core (test nuevo
+  `engine::tests::keep_on_a_selective_phone_keeps_the_playlist_marked` pasa). Pendiente de
+  aclarar con el usuario.
+- Gotcha de entorno: `pnpm dev:android` falló con "rustc-LLVM ERROR: out of memory" con 9 GB de
+  RAM libre: el límite que se llenó es la memoria **confirmada** (commit charge ~30/32 GB;
+  rust-analyzer ~4 GB y mysqld ~2,4 GB reservados casi sin uso). Fix: cerrar rust-analyzer/
+  MySQL, o agrandar el archivo de paginación (lo hace el usuario).
+- Verificado: `cargo test -p sway-core`, `cargo check` app, `pnpm tsc --noEmit`. Sin probar en
+  device.
+
 ## 2026-10-13 · Commits de la Fase 2
 
 - Dos commits en `master` (pedido del usuario: separar): `c0c8618 chore(desktop): isolate dev

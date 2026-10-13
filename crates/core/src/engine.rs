@@ -1572,6 +1572,54 @@ mod tests {
         assert_eq!((r.received, r.sent, r.organized), (0, 0, 0));
     }
 
+    /// Reported 2026-10-13: with the phone in selective mode, "Keep" left the
+    /// kept playlist unmarked. The mark has to survive the whole round.
+    #[test]
+    fn keep_on_a_selective_phone_keeps_the_playlist_marked() {
+        let pc = Device::new("keepsel-pc");
+        let phone = Device::new("keepsel-phone");
+        let t1 = pc.add_track("uno.flac", &audio(2048, 51), "One");
+        let set = pc.playlist("Set", None);
+        pc.add_to_playlist(set, &[&t1]);
+        pair(&pc, &phone);
+        let set_uid: String = pc
+            .with_db(|c| Ok(c.query_row("SELECT uid FROM playlists", [], |r| r.get(0))?))
+            .unwrap();
+        let me = phone.uid();
+        phone
+            .with_db(|c| {
+                crate::scope::set_mode(c, &me, crate::scope::Mode::Selected)?;
+                crate::scope::set_playlist(c, &me, &set_uid, true)?;
+                Ok(())
+            })
+            .unwrap();
+        sync_once(&phone, &pc).unwrap();
+        assert_eq!(phone.audio_files().len(), 1);
+
+        unpair(&pc, &phone);
+        pc.delete_track(&t1);
+        pc.with_db(|c| Ok(crate::db::delete_playlist(c, set)?)).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        pair(&pc, &phone);
+        sync_once(&phone, &pc).unwrap();
+        let marked = |d: &Device| {
+            let u = d.uid();
+            d.with_db(|c| Ok(crate::scope::get(c, &u)?.selected.contains(&set_uid))).unwrap()
+        };
+        assert!(marked(&phone), "held: still marked");
+
+        std::thread::sleep(Duration::from_millis(5));
+        let (music, pcu) = (phone.music_dir(), pc.uid());
+        phone
+            .with_db(|c| Ok(crate::merge::resolve_pending(c, &music, &pcu, true)?))
+            .unwrap();
+        sync_once(&phone, &pc).unwrap();
+        sync_once(&phone, &pc).unwrap();
+        assert!(marked(&phone), "kept: still marked");
+        assert_eq!(phone.audio_files().len(), 1);
+        assert_eq!(pc.track_uids().len(), 1);
+    }
+
     /// Same, held on the side that serves (the PC initiates), and answered
     /// "delete here too". A delete made while linked still applies on its own.
     #[test]
