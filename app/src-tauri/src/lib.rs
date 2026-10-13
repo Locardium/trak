@@ -41,6 +41,13 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+/// Desktop dev builds (`tauri dev`, debug assertions on) are a separate app
+/// from the release: their own folder under `<Music>` (db, library, covers,
+/// webview profile), their own single-instance lock and their own name on
+/// the network. Otherwise running dev on the machine that has the release
+/// installed would work on — and sync from — the real library.
+pub(crate) const DATA_DIR: &str = if cfg!(debug_assertions) { "Sway Dev" } else { "Sway" };
+
 /// One-time migration: on Android tracks used to live in
 /// `<managed folder>/Sway`, one level too deep — the managed folder is
 /// already private to the app (`…/files/Music`), so that subdirectory
@@ -1845,6 +1852,18 @@ fn spawn_folder_watch(handle: AppHandle, dir: PathBuf) {
     });
 }
 
+/// On desktop dev the identifier gets `.dev`, like the Android dev app. The
+/// single-instance plugin derives its lock from it: with the release's
+/// identifier, launching dev while the release is open would just focus the
+/// release window and exit.
+fn context() -> tauri::Context<tauri::Wry> {
+    #[allow(unused_mut)]
+    let mut ctx = tauri::generate_context!();
+    #[cfg(all(debug_assertions, not(any(target_os = "android", target_os = "ios"))))]
+    ctx.config_mut().identifier.push_str(".dev");
+    ctx
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Desktop: without this the sync's log::* calls aren't seen anywhere.
@@ -1918,8 +1937,15 @@ pub fn run() {
             let dir = if cfg!(target_os = "android") {
                 audio_dir
             } else {
-                audio_dir.join("Sway")
+                audio_dir.join(DATA_DIR)
             };
+            // Read by `default_device_name` the first time the db is
+            // created: without it dev would show up to peers with the same
+            // name as the release on this PC.
+            #[cfg(all(debug_assertions, not(any(target_os = "android", target_os = "ios"))))]
+            if let Ok(pc) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")) {
+                std::env::set_var("SWAY_DEVICE_NAME", format!("{} Dev", pc.trim()));
+            }
             std::fs::create_dir_all(&dir).ok();
             let db_file = dir.join("db.sqlite");
             // TEMPORARY — see `perf_line`. Truncated on every startup so
@@ -2083,7 +2109,7 @@ pub fn run() {
                     "main",
                     tauri::WebviewUrl::default(),
                 )
-                .title("Sway")
+                .title(if cfg!(debug_assertions) { "Sway Dev" } else { "Sway" })
                 .inner_size(1100.0, 720.0)
                 .min_inner_size(720.0, 480.0)
                 .data_directory(webview_dir)
@@ -2160,6 +2186,6 @@ pub fn run() {
             free_space,
             sync_history
         ])
-        .run(tauri::generate_context!())
+        .run(context())
         .expect("error while running tauri application");
 }
