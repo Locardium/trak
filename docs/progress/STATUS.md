@@ -12,8 +12,8 @@ aislado" y Fase 2). Fase 4 cerrada y commiteada 2026-09-29.
 `beta1-fase4`, `backup-pre-rewrite` y el stash viejo se borraron 2026-09-29 (ver LOG). El push
 lo hace el usuario.
 **Próximo paso (en este orden, actualizado 2026-10-13):**
-0. Fase 2 completa y confirmada en device (2.1-2.12, 2026-10-13). Falta commitear 2.9, 2.10,
-   el contador del log del server y el test de 2.11 (sin commit). Antes de cada commit:
+0. Fase 2 completa, confirmada en device y commiteada (2.1-2.12, 2026-10-13; último commit
+   `d76327f`). Sin push. Sigue la Fase 5. Antes de cada commit:
    `gen/android/app/build.gradle.kts` sale `w/mixed` por el CLI de Tauri → `git checkout`.
 1. Al probar: PC + celu + server con protocolo 2 (2.8 ya chequea: un build viejo sale como
    "Update needed"; la release instalada 1.0.0-1 no tiene chequeo y se actualiza a mano). Datos dev: PC dev en `<Music>\Sway Dev`, server dev con

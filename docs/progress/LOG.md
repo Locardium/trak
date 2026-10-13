@@ -10,7 +10,8 @@
 - Usuario: 2.8 "listo perfecto" (badge "Update needed" + línea en el log del server). 2.11 no
   se repitió; "seleccionada" era la playlist abierta en el panel izquierdo (no el tilde de Sync):
   cerrado. 2.12 lo atribuye al modo dev (Vite): cerrado, reabrir si pasa en un build release.
-- Queda sin commit: 2.9, 2.10, contador del log del server (`host.rs`), test de 2.11, docs.
+- Commiteado en `d76327f fix: scope prompt on re-link, grey tracks, server log counter` (2.9,
+  2.10, contador del log del server, test de 2.11, docs). Sin push.
 
 ## 2026-10-13 · 2.6 confirmado + recarga del WebView en el celu (2.12)
 
