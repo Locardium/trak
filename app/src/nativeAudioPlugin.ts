@@ -1,4 +1,4 @@
-// JS side of `crates/native-audio`, Sway's fork of `tauri-plugin-native-audio`
+// JS side of `crates/native-audio`, Trak's fork of `tauri-plugin-native-audio`
 // (see its FORK.md). It replaces the `tauri-plugin-native-audio-api` package:
 // the fork adds commands that package doesn't know about, and publishing a
 // package just to import six more `invoke` calls isn't worth it.

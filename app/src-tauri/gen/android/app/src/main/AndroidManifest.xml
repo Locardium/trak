@@ -9,7 +9,7 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Fase 1.3: pedirle al usuario que excluya a Sway de la optimizacion de
+    <!-- Fase 1.3: pedirle al usuario que excluya a Trak de la optimizacion de
          bateria (Settings). Sin esto, Doze/App Standby (y en Samsung, sus
          "sleeping apps" propios) pueden congelar o matar el proceso mientras
          el servicio de audio sigue "sonando" segun la notificacion, y los
@@ -26,7 +26,7 @@
     <application
         android:icon="@mipmap/ic_launcher"
         android:label="${appLabel}"
-        android:theme="@style/Theme.sway"
+        android:theme="@style/Theme.trak"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
         <!-- windowSoftInputMode: sin esto el teclado se dibuja ENCIMA del
              webview y escribis a ciegas, con el campo tapado. `adjustResize`

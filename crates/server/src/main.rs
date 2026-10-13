@@ -1,4 +1,4 @@
-//! Sway's archive and sync server.
+//! Trak's archive and sync server.
 //!
 //! Stores whatever devices send it and hands it back when they ask for it.
 //! It doesn't import music on its own and has no interface: everything it
@@ -18,17 +18,17 @@ use anyhow::{Context, Result};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use sway_core::{db, engine::Host, pairing};
-use sway_server::config::Config;
-use sway_server::host::ServerHost;
-use sway_server::serve;
+use trak_core::{db, engine::Host, pairing};
+use trak_server::config::Config;
+use trak_server::host::ServerHost;
+use trak_server::serve;
 
 const DEFAULT_CONFIG: &str = "config.toml";
 /// The previous name. A server that's already running still has this one,
 /// and starting with the new name would write a fresh config —with ANOTHER
 /// token— and shut down without ever listening, which under systemd is a
 /// silent outage. It's still accepted, with a warning.
-const LEGACY_CONFIG: &str = "sway-server.toml";
+const LEGACY_CONFIG: &str = "trak-server.toml";
 
 fn main() {
     let code = match run() {
@@ -72,7 +72,7 @@ fn hold_window_open() {}
 
 fn run() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    sway_core::wire::set_app_version(env!("CARGO_PKG_VERSION"));
+    trak_core::wire::set_app_version(env!("CARGO_PKG_VERSION"));
 
     let path = config_path();
     let Some(cfg) = Config::load_or_create(&path)? else {
@@ -109,8 +109,8 @@ fn run() -> Result<()> {
     // server in the list.
     hostage.with_db(|conn| {
         let me = db::this_device_uid(conn)?;
-        sway_core::scope::set_mode(conn, &me, sway_core::scope::Mode::All)?;
-        sway_core::scope::set_direction(conn, &me, "both")?;
+        trak_core::scope::set_mode(conn, &me, trak_core::scope::Mode::All)?;
+        trak_core::scope::set_direction(conn, &me, "both")?;
         Ok(())
     })?;
 
@@ -127,10 +127,10 @@ fn run() -> Result<()> {
     log::info!("[server] public key {}", fingerprint(&pubkey));
     log::info!("[server] files in {}", cfg.music_dir.display());
     log::info!(
-        "[server] sway-server {}, protocol {} (accepts {}+)",
+        "[server] trak-server {}, protocol {} (accepts {}+)",
         env!("CARGO_PKG_VERSION"),
-        sway_core::wire::PROTOCOL,
-        sway_core::wire::MIN_PROTOCOL
+        trak_core::wire::PROTOCOL,
+        trak_core::wire::MIN_PROTOCOL
     );
 
     serve::run(
@@ -144,7 +144,7 @@ fn run() -> Result<()> {
 
 fn spawn_trash_purge(music_dir: PathBuf, retention_days: u64) {
     std::thread::spawn(move || loop {
-        let n = sway_core::trash::purge_old(&music_dir, retention_days);
+        let n = trak_core::trash::purge_old(&music_dir, retention_days);
         if n > 0 {
             log::info!("[server] trash: {n} file(s) older than {retention_days} days removed");
         }
@@ -154,7 +154,7 @@ fn spawn_trash_purge(music_dir: PathBuf, retention_days: u64) {
 
 fn config_path() -> PathBuf {
     // A single option, and that's why there's no argument-parsing library:
-    //   sway-server [config-path]
+    //   trak-server [config-path]
     // `--config <path>` is accepted too: it's what anyone types by habit, and
     // taken as a path it silently wrote a fresh config to a file literally
     // named `--config`.
@@ -162,7 +162,7 @@ fn config_path() -> PathBuf {
     let arg = match args.next() {
         Some(flag) if flag == "--config" => args.next(),
         Some(flag) if flag.starts_with('-') => {
-            eprintln!("usage: sway-server [config-path]");
+            eprintln!("usage: trak-server [config-path]");
             std::process::exit(2);
         }
         other => other,
@@ -205,7 +205,7 @@ mod tests {
 
     fn tmp(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "sway-cfgpath-{tag}-{}-{:?}",
+            "trak-cfgpath-{tag}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

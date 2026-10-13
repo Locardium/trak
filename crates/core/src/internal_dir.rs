@@ -1,8 +1,8 @@
 //! Where `trash/` and `incoming/` live relative to the managed music
 //! folder.
 //!
-//! On desktop `music_dir` is `<sway>/library`: the internal dirs sit next to
-//! it, in `<sway>`, so they never look like tracks to the scanner. On
+//! On desktop `music_dir` is `<trak>/library`: the internal dirs sit next to
+//! it, in `<trak>`, so they never look like tracks to the scanner. On
 //! Android there's no `library` split — `music_dir` is already the app's
 //! private folder — so the internal dirs live inside it directly.
 

@@ -1,4 +1,4 @@
-//! Sway's fork of `tauri-plugin-native-audio` — see `FORK.md`.
+//! Trak's fork of `tauri-plugin-native-audio` — see `FORK.md`.
 //!
 //! Almost everything this crate does lives in Kotlin (Android) and Swift
 //! (iOS). Commands the webview calls are declared in `build.rs` and reach the

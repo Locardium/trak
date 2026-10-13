@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn hash_is_stable_and_content_dependent() {
-        let dir = std::env::temp_dir().join(format!("sway-hash-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("trak-hash-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.bin");
         let b = dir.join("b.bin");
@@ -120,7 +120,7 @@ mod tests {
                 size_bytes INTEGER, mtime_ms INTEGER);",
         )
         .unwrap();
-        let dir = std::env::temp_dir().join(format!("sway-stamp-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("trak-stamp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("t.bin");
         std::fs::write(&f, b"hello").unwrap();

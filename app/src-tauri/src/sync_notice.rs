@@ -12,7 +12,7 @@
 //! survive it. A sync wins while both exist (the sweep waits for syncs
 //! anyway); when the last sync ends the notification goes back to the sweep.
 
-use sway_core::engine::Progress;
+use trak_core::engine::Progress;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Mutex;

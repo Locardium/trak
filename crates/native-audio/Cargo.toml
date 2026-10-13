@@ -4,7 +4,7 @@
 # The name and `links` key stay identical to upstream on purpose: `tauri-plugin`
 # derives the permission namespace from the package name minus the
 # `tauri-plugin-` prefix, so renaming the crate would rename every permission to
-# `sway-plugin-native-audio:*` and break `native-audio:default` in
+# `trak-plugin-native-audio:*` and break `native-audio:default` in
 # `app/src-tauri/capabilities/mobile.json`. The path dependency in
 # `app/src-tauri/Cargo.toml` is what takes this over the crates.io version.
 [package]
@@ -15,7 +15,7 @@ rust-version = "1.77.2"
 build = "build.rs"
 links = "tauri-plugin-native-audio"
 publish = false
-description = "Native mobile audio playback plugin for Tauri (Sway fork)"
+description = "Native mobile audio playback plugin for Tauri (Trak fork)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/uvarov-frontend/tauri-plugin-native-audio"
 

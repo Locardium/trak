@@ -1,15 +1,16 @@
 [package]
-name = "sway-server"
+name = "trak-server"
 version = "0.1.0"
-description = "Sway's archive and sync server — no interface, meant to be left running"
+description = "Trak's archive and sync server — no interface, meant to be left running"
 edition = "2021"
+license = "BUSL-1.1"
 
 [lib]
-name = "sway_server"
+name = "trak_server"
 path = "src/lib.rs"
 
 [[bin]]
-name = "sway-server"
+name = "trak-server"
 path = "src/main.rs"
 
 [dependencies]
@@ -17,7 +18,7 @@ path = "src/main.rs"
 # the whole point: a server with its own implementation of the protocol
 # would be a second thing to keep in sync, and the one that falls behind
 # corrupts libraries.
-sway-core = { path = "../core" }
+trak-core = { path = "../core" }
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11.11"

@@ -232,7 +232,7 @@ pub fn token_still_valid(conn: &Connection, uid: &str, token: &str) -> bool {
 }
 
 fn token_hash(token: &str) -> String {
-    blake3::derive_key("sway pairing token v1", token.as_bytes())
+    blake3::derive_key("trak pairing token v1", token.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()

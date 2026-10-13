@@ -62,8 +62,8 @@ tools/itunes-xml-poc/*.xml
 /config.toml
 /crates/server/config.toml
 # Y el nombre viejo, por si queda alguno dando vueltas.
-/sway-server.toml
-/crates/server/sway-server.toml
+/trak-server.toml
+/crates/server/trak-server.toml
 
 # === Secretos / entorno ===
 .env

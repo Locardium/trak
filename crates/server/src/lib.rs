@@ -1,4 +1,4 @@
-//! Sway's archive and sync server.
+//! Trak's archive and sync server.
 //!
 //! The binary is a thin wrapper around this (read the config, open the
 //! database, listen). It's split this way so tests can spin up a real

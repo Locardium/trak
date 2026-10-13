@@ -1,4 +1,4 @@
-# Plan beta 1 — bugfix + mejoras Sway
+# Plan beta 1 — bugfix + mejoras Trak (antes Sway, renombrada en 5.3)
 
 > Documento de referencia (causas raíz y fixes). El estado de cada ítem vive en `STATUS.md`,
 > la historia en `LOG.md`. Los `archivo:línea` son de 2026-09-11: verificar antes de editar.
@@ -699,20 +699,66 @@ Hoy los artefactos quedan desparramados y `scripts/release-win.js` los busca por
 `app/src-tauri/gen/android/app/build/outputs/` **que ningún script recoge**.
 
 Fix: paso de staging en `release-win.js` después del build → copiar todo a `dist/<tag>/` con nombres
-finales (`Sway-<tag>.msi`, `sway-<tag>.apk`, `sway-server-windows.exe`, `sway-server-linux`), y que
+finales (`Trak-<tag>-setup.exe`, `Trak-<tag>-portable.exe`, `trak-<tag>.apk`, `trak-server-windows.exe`, `trak-server-linux`; MSI ya no, ver 5.4), y que
 `gh release create` suba desde ahí. Agregar `pnpm build:android` al release. Agregar `dist/` al
 `.gitignore`. De paso: `scripts/bump-version.js` no bumpea `crates/server/Cargo.toml`.
 
 ### 5.2 Cómo usar el server, sobre todo en Linux (notes: AGREGAR)
 
 La documentación buena ya existe en `crates/server/README.md` (build con `cargo-zigbuild` a
-`x86_64-unknown-linux-musl`, `config.toml` completo, `SWAY_SERVER_TOKEN`, unit de systemd) pero el
+`x86_64-unknown-linux-musl`, `config.toml` completo, `TRAK_SERVER_TOKEN`, unit de systemd) pero el
 README raíz no la linkea y sólo tiene tres líneas de `pnpm` scripts.
 
 Fix: sección "Running the server" en el `README.md` raíz con el quickstart de Linux (bajar el
 binario del release, primer arranque que escribe `config.toml` y sale — `config.rs:73-99`, editar,
 systemd) y link a `crates/server/README.md`. Agregar un `config.example.toml` al repo (el real está
 gitignoreado porque tiene el `pair_token`).
+
+### 5.3 Renombrar Sway → Trak (pedido 2026-10-13)
+
+"sway" aparece en ~68 archivos fuera de `docs/` (`git grep -il sway`): crates `sway-core`/
+`sway-server`, `SERVICE_TYPE = "_sway._tcp.local."` (`discovery.rs`), `DATA_DIR` (`lib.rs`),
+`productName`/`identifier`/título en `tauri.conf.json`, paquete Kotlin `com/locardium/sway`
+(MainActivity), `SyncService.kt`, env `SWAY_DEVICE_NAME`/`TRAK_SERVER_TOKEN`, scripts, READMEs.
+Decidido: Android `applicationId` = `com.locardium.trak.player` (app nueva, no actualiza encima de
+Sway). Cambiar mDNS = peers viejos invisibles → `PROTOCOL`/`MIN_PROTOCOL` = 3 + actualizar la
+huella de `wire::tests::protocol_fingerprint`.
+
+### 5.4 Portable + instalable, datos fuera de `<Music>` (pedido 2026-10-13)
+
+Hoy: `<Music>\Trak` (`lib.rs` setup, `audio_dir().join(DATA_DIR)`) con `db.sqlite`, `library/`,
+`covers/`, `trash/`, `incoming/`, perfil del webview (`adopt_legacy_webview_profile` lo sacó de
+AppData). Pedido: TODO directo en la carpeta del exe, sin subcarpeta, tanto portable como
+instalada. Regla única: datos = carpeta del exe.
+
+Decidido con el usuario (2026-10-13):
+- Instalador **NSIS** (no MSI: WiX exige versión numérica, ver `release-win.js`; los permisos
+  en NSIS son un hook). `installMode` perMachine: admin UNA vez al instalar. Default
+  `C:\Program Files\Trak`, el usuario puede elegir otra carpeta.
+- Hook post-install: `icacls "$INSTDIR" /grant *S-1-5-32-545:(OI)(CI)M` (SID de Users, anda
+  con Windows en español) y a `Trak.exe` + desinstalador sacarles la herencia y dejar Users en
+  RX, así un proceso sin admin no puede reemplazar el exe. NO correr la app elevada: rompe el
+  drag & drop desde el Explorer (UIPI, 4.4).
+- Desinstalar/actualizar no puede borrar db/library: revisar el desinstalador de Tauri (que no
+  haga `RMDir /r $INSTDIR`) y probarlo.
+- Portable: `Trak.exe` suelto (o zip); crea los datos al lado.
+- Dev (`tauri dev`): no usar `target/debug` (lo borra `cargo clean`); elegir carpeta fija.
+- Sin migración: el usuario mueve `Music\Sway` a mano. El XML de iTunes viejo tiene el marcador
+  "Sway Generator": Trak lo trata como ajeno y hace un backup `.original` una vez (inofensivo).
+- Con datos fuera de AppData de entrada, `adopt_legacy_webview_profile` deja de tener sentido
+  (identifier nuevo): borrarlo.
+
+### 5.6 Server en Docker (pedido 2026-10-13)
+
+El server no usa mDNS (los devices lo emparejan por dirección), así que alcanza con publicar el
+puerto (`listen = "0.0.0.0:7420"`, `crates/server/src/config.rs`), sin `network_mode: host`.
+Plan: `Dockerfile` multi-stage (build `x86_64-unknown-linux-musl` → imagen mínima, usuario no
+root), volumen único `/srv/trak` con `config.toml`, `data/` y `music/` (los defaults de
+`data_dir`/`music_dir` son relativos: correr con workdir ahí), `docker-compose.yml` de ejemplo y
+sección en el README. Gotcha: `Config::load_or_create` en el primer arranque escribe el config y
+SALE (`config.rs:73-99`) → el contenedor muere la primera vez. Opciones: documentarlo (editar y
+`docker compose up` de nuevo) o que con `TRAK_SERVER_TOKEN` seteado arranque directo con
+defaults. Decidir al implementar. Publicar imagen en GHCR desde el script de release (5.1).
 
 ---
 
@@ -750,7 +796,7 @@ Por fase, en este orden:
    sin loop de reintentos infinito en el log.
 4. Cargar 20 tracks en la PC y después abrir el celu → una sola fuente por vez en `sync_log`.
 
-**Fase 3 (audio).** `cargo test -p sway-core` (los tests de `playback_gain_db` en `db.rs:1294-1345`
+**Fase 3 (audio).** `cargo test -p trak-core` (los tests de `playback_gain_db` en `db.rs:1294-1345`
 hay que actualizarlos con el nuevo target y el cap de peak). Después, a oído: un track masterizado
 hot con normalize on no debe distorsionar. Un WAV sin tags tiene que mostrar título y artista en la
 notificación.

@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { getUiSetting, setUiSetting } from './api';
 
 /// A small piece of UI state kept in the database — which lives in
-/// `<Music>/Sway` — rather than in the webview's `localStorage`, which sits in
-/// the browser profile under AppData. Nothing Sway owns belongs there.
+/// `<Music>/Trak` — rather than in the webview's `localStorage`, which sits in
+/// the browser profile under AppData. Nothing Trak owns belongs there.
 ///
 /// Reading is a round trip now, so the value starts at `initial` and is
 /// replaced when the stored one lands. Writes are held back until that has

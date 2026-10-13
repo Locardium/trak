@@ -126,7 +126,7 @@ export const nativeQueue = android
   : null;
 export const setAppVisible = nativeAudio.setAppVisible;
 
-/// Fase 1.3, Android only: whether Sway is exempt from battery optimization,
+/// Fase 1.3, Android only: whether Trak is exempt from battery optimization,
 /// and a way to ask for it. `null` on desktop — there is no such thing there.
 export const isIgnoringBatteryOptimizations = android
   ? nativeAudio.isIgnoringBatteryOptimizations
@@ -263,8 +263,8 @@ export const setAutoSyncXml = (enabled: boolean) => invoke<void>('set_auto_sync_
 
 /// UI state the frontend owns (column layout, and whatever comes next).
 /// Deliberately NOT `localStorage`: that lives in the webview's profile under
-/// AppData, and nothing Sway owns belongs there. These land in the db, in
-/// `<Music>/Sway`, next to the library.
+/// AppData, and nothing Trak owns belongs there. These land in the db, in
+/// `<Music>/Trak`, next to the library.
 export const getUiSetting = (key: string) => invoke<string | null>('get_ui_setting', { key });
 export const setUiSetting = (key: string, value: string) =>
   invoke<void>('set_ui_setting', { key, value });

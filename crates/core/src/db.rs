@@ -47,7 +47,7 @@ const SCHEMA: &str = "
 --                  verified during a transfer, and what allows deduplicating
 --                  the same file imported twice separately.
 -- Kept separate because editing the genre changes metadata but not bytes: same uid,
--- same hash, new clock. (Corollary: Sway does NOT rewrite tags inside the
+-- same hash, new clock. (Corollary: Trak does NOT rewrite tags inside the
 -- files; if it ever did, the blob would need to be rehashed and propagated.)
 CREATE TABLE IF NOT EXISTS tracks (
     id          INTEGER PRIMARY KEY,

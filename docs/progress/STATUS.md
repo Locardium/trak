@@ -12,11 +12,14 @@ aislado" y Fase 2). Fase 4 cerrada y commiteada 2026-09-29.
 `beta1-fase4`, `backup-pre-rewrite` y el stash viejo se borraron 2026-09-29 (ver LOG). El push
 lo hace el usuario.
 **Próximo paso (en este orden, actualizado 2026-10-13):**
+-1. Fase 5 en curso (sin commit): 5.5 licencia hecha, 5.3 rename Sway → Trak hecho (falta
+   probar Android con `pnpm dev:android`), sigue 5.4 (portable + instalador NSIS), después 5.1
+   y 5.2 (usan los nombres y artefactos nuevos).
 0. Fase 2 completa, confirmada en device y commiteada (2.1-2.12, 2026-10-13; último commit
    `d76327f`). Sin push. Sigue la Fase 5. Antes de cada commit:
    `gen/android/app/build.gradle.kts` sale `w/mixed` por el CLI de Tauri → `git checkout`.
 1. Al probar: PC + celu + server con protocolo 2 (2.8 ya chequea: un build viejo sale como
-   "Update needed"; la release instalada 1.0.0-1 no tiene chequeo y se actualiza a mano). Datos dev: PC dev en `<Music>\Sway Dev`, server dev con
+   "Update needed"; la release instalada 1.0.0-1 no tiene chequeo y se actualiza a mano). Datos dev: PC dev en `<Music>\Trak Dev` (hasta 5.4), server dev con
    `pnpm server:dev` (corre en `target/server-dev/`: `config.toml`, `data/`, `music/` ahí).
 2. **Fase 5** (5.1 artefactos del release en `dist/<tag>/` + APK; 5.2 README del server en Linux).
 3. Fase 1 confirmada por el usuario 2026-10-13 (1.2-1.7). 1.7 parte B (reanudación Media3 con
@@ -182,6 +185,31 @@ Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que deber�
 ## Fase 5 — Release y docs
 - ⬜ 5.1 Todos los artefactos del release en `dist/<tag>/` (+ APK)
 - ⬜ 5.2 README: cómo correr el server en Linux
+- 🧪 5.3 (hecho 2026-10-13, sin commit, falta probar en device) Rename Sway → Trak en todo el
+  código (65 archivos, ver LOG). Crates `trak-core`/`trak-server`/`trak` (lib `trak_lib`),
+  mDNS `_trak._tcp`, env `TRAK_DEVICE_NAME`/`TRAK_SERVER_TOKEN`, Android
+  `com.locardium.trak.player` (dev `.dev`, app NUEVA: desinstalar Sway y re-sincronizar),
+  `PROTOCOL`/`MIN_PROTOCOL` = 3. También el contexto del hash del token (`"trak pairing token v1"`,
+  `crates/core/src/pairing.rs`): los pairings guardados en el server quedan inválidos → el
+  device muestra "Pairing broken" (2.3) y hay que emparejar de nuevo una vez. NO se renombró: `docs/`, `tools/`, la
+  carpeta del repo ni el repo de GitHub (`Locardium/sway`, lo renombra el usuario después). Tests core,
+  server, app y `tsc` pasan. Falta: `pnpm dev:android` (paquete Kotlin movido a
+  `com/locardium/trak/player`, se borró el `generated/` viejo; el CLI lo regenera).
+- ⬜ 5.4 (pedido 2026-10-13) Dos builds de Windows: portable e instalable, TODO directo en la
+  carpeta del exe (sin subcarpeta `data`). Sale de `<Music>`. Decidido: instalador NSIS (sin
+  MSI), pide admin una vez, default `C:\Program Files\Trak`, el usuario puede elegir otra
+  carpeta; el instalador da Modify a Users (SID `*S-1-5-32-545`) sobre la carpeta y se lo saca
+  a `Trak.exe` y al desinstalador. Desinstalar/actualizar NO borra los datos. Sin migración:
+  el usuario mueve `Music\Sway` a mano (documentar). Ver PLAN 5.4.
+- ⬜ 5.6 (pedido 2026-10-13) Server en Docker: `Dockerfile` (binario musl estático sobre imagen
+  mínima), volúmenes para config/data/music, puerto 7420, `docker-compose.yml` de ejemplo,
+  imagen publicada en el release (GHCR). Ver PLAN 5.6.
+- 🧪 5.5 (pedido y hecho 2026-10-13, sin commit) Licencia BSL 1.1: `LICENSE` en la raíz (texto
+  oficial de SPDX `BUSL-1.1`, Terms idénticos), Licensor Locardium, Additional Use Grant = uso
+  personal, pruebas y self-hosting gratis; prohibido uso comercial. Change Date 4 años por
+  versión → Apache 2.0. README "License" + `license = "BUSL-1.1"` en Cargo/package.json.
+  `crates/native-audio` sigue MIT/Apache. Falta: que el usuario revise el texto; GitHub detecta
+  la licencia al hacer push.
 
 ## Fase 6 — Rediseño de UI
 - ⬜ Se planea aparte cuando terminen las fases 1-5.

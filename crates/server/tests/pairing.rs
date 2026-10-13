@@ -10,11 +10,11 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use sway_core::db;
-use sway_core::engine::Host;
-use sway_core::wire::{generate_keypair, Msg, Session};
-use sway_server::host::ServerHost;
-use sway_server::serve::{self, Server};
+use trak_core::db;
+use trak_core::engine::Host;
+use trak_core::wire::{generate_keypair, Msg, Session};
+use trak_server::host::ServerHost;
+use trak_server::serve::{self, Server};
 
 const TOKEN: &str = "a-test-token";
 /// If something is left waiting it's a bug: an error is worth more than a
@@ -23,7 +23,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn tmpdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "sway-srv-{tag}-{}-{:?}",
+        "trak-srv-{tag}-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
     ));
@@ -35,7 +35,7 @@ fn tmpdir(tag: &str) -> PathBuf {
 /// Brings up a server with an in-memory database and returns where to connect to it.
 fn start(tag: &str) -> (Arc<Server>, String) {
     let dir = tmpdir(tag);
-    let conn = sway_core::rusqlite::Connection::open_in_memory().unwrap();
+    let conn = trak_core::rusqlite::Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();
     db::this_device_uid(&conn).unwrap();
     db::set_device_name(&conn, "Test Server").unwrap();
@@ -228,7 +228,7 @@ fn a_different_key_for_a_known_uid_gets_rejected() {
     server
         .host
         .with_db(|conn| {
-            sway_core::pairing::store_device(conn, "device-1", "Phone", "android", b"the-original")
+            trak_core::pairing::store_device(conn, "device-1", "Phone", "android", b"the-original")
         })
         .unwrap();
 
@@ -261,7 +261,7 @@ fn the_token_is_not_enough_if_the_key_does_not_match() {
     server
         .host
         .with_db(|conn| {
-            sway_core::pairing::store_device(conn, "device-1", "Phone", "android", b"the-original")
+            trak_core::pairing::store_device(conn, "device-1", "Phone", "android", b"the-original")
         })
         .unwrap();
 

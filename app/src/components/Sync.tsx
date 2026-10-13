@@ -865,7 +865,7 @@ export default function Sync({ nodes, onClose, onStatus, onLibraryChanged }: Pro
             <div className="set-label">
               <span>On this network</span>
               <small>
-                {peers.length === 0 ? 'Looking for other devices running Sway…' : `${peers.length} found`}
+                {peers.length === 0 ? 'Looking for other devices running Trak…' : `${peers.length} found`}
               </small>
             </div>
             <button onClick={rescan} disabled={scanning}>

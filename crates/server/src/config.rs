@@ -49,7 +49,7 @@ fn default_listen() -> String {
     "0.0.0.0:7420".into()
 }
 fn default_name() -> String {
-    "Sway Server".into()
+    "Trak Server".into()
 }
 fn default_data_dir() -> PathBuf {
     "data".into()
@@ -65,7 +65,7 @@ impl Config {
     /// Environment variable that overrides the file's `pair_token`. In a
     /// deployment it's best for the secret not to live in a file that could
     /// end up in a repo.
-    pub const TOKEN_ENV: &'static str = "SWAY_SERVER_TOKEN";
+    pub const TOKEN_ENV: &'static str = "TRAK_SERVER_TOKEN";
 
     /// Loads the file. If it doesn't exist, writes it with a new token and
     /// returns `None`: the first run doesn't start listening, it just prints
@@ -100,7 +100,7 @@ impl Config {
 /// stay: this file will be read by a person who never saw this code.
 fn template(token: &str) -> String {
     format!(
-        r#"# Sway archive and sync server.
+        r#"# Trak archive and sync server.
 #
 # Keeps whatever your devices send it and hands it back when they ask. It
 # never imports music on its own: everything it has, someone sent it.
@@ -109,7 +109,7 @@ fn template(token: &str) -> String {
 listen = "0.0.0.0:7420"
 
 # How it shows up in the device list in the app.
-name = "Sway Server"
+name = "Trak Server"
 
 # The database: identity of every track, playlists, and per-device state.
 #
@@ -143,7 +143,7 @@ mod tests {
 
     fn tmp(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "sway-cfg-{tag}-{}-{:?}",
+            "trak-cfg-{tag}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

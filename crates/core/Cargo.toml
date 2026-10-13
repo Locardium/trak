@@ -1,8 +1,9 @@
 [package]
-name = "sway-core"
+name = "trak-core"
 version = "0.1.0"
-description = "Sway's library and sync engine, no UI"
+description = "Trak's library and sync engine, no UI"
 edition = "2021"
+license = "BUSL-1.1"
 
 [dependencies]
 anyhow = "1"
@@ -50,7 +51,7 @@ snow = { version = "0.10", default-features = false, features = [
 ] }
 
 # The OS trash doesn't exist on Android (see db.rs::delete_tracks, which
-# deletes directly there). The rest of Sway's trash is our own and pure
+# deletes directly there). The rest of Trak's trash is our own and pure
 # filesystem (trash.rs), so it works everywhere.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 trash = "5.2.6"

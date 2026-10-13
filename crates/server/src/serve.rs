@@ -7,7 +7,7 @@
 //!
 //! Everything else — verifying the key against the one already stored,
 //! rejecting one that doesn't match, registering the device, serving the
-//! manifest and the files — is literally `sway_core`'s code. A separate copy
+//! manifest and the files — is literally `trak_core`'s code. A separate copy
 //! of the protocol here would be a second implementation to keep up to date,
 //! and the one that falls behind corrupts libraries.
 
@@ -15,10 +15,10 @@ use crate::host::ServerHost;
 use anyhow::{anyhow, Result};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use sway_core::engine::{self, is_disconnect};
-use sway_core::pairing::{self as pair, Known};
-use sway_core::wire::{Msg, Session, VersionMismatch, MIN_PROTOCOL, PROTOCOL};
-use sway_core::{db, engine::Host};
+use trak_core::engine::{self, is_disconnect};
+use trak_core::pairing::{self as pair, Known};
+use trak_core::wire::{Msg, Session, VersionMismatch, MIN_PROTOCOL, PROTOCOL};
+use trak_core::{db, engine::Host};
 
 pub struct Server {
     pub host: Arc<ServerHost>,
@@ -51,13 +51,13 @@ pub fn run(server: Arc<Server>, listener: TcpListener) -> Result<()> {
                     let theirs = v.theirs.map_or("none".to_string(), |p| p.to_string());
                     if v.peer_is_older {
                         log::warn!(
-                            "[server] {peer} runs an older Sway (protocol {theirs}, this server \
+                            "[server] {peer} runs an older Trak (protocol {theirs}, this server \
                              {PROTOCOL}, min {MIN_PROTOCOL}): update the app on that device"
                         );
                     } else {
                         log::warn!(
-                            "[server] {peer} runs a newer Sway (app {}, protocol {theirs}; this \
-                             server {PROTOCOL}): update sway-server",
+                            "[server] {peer} runs a newer Trak (app {}, protocol {theirs}; this \
+                             server {PROTOCOL}): update trak-server",
                             v.their_app
                         );
                     }

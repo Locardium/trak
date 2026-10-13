@@ -879,7 +879,7 @@ mod tests {
 
     fn tmp(n: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("sway-player-{}-{n}.wav", std::process::id()));
+        p.push(format!("trak-player-{}-{n}.wav", std::process::id()));
         p
     }
 

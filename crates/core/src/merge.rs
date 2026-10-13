@@ -1008,7 +1008,7 @@ mod tests {
 
     fn tmp_music(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!(
-            "sway-merge-{tag}-{}-{:?}",
+            "trak-merge-{tag}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

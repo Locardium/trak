@@ -1,4 +1,4 @@
-package com.locardium.sway
+package com.locardium.trak.player
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -14,7 +14,7 @@ import android.webkit.WebView
 import androidx.media3.ui.PlayerNotificationManager
 import app.tauri.nativeaudio.NativeAudioRuntime
 
-/// Sway maneja la cola de reproduccion del lado JS (ver App.tsx), asi que la
+/// Trak maneja la cola de reproduccion del lado JS (ver App.tsx), asi que la
 /// app necesita dos cosas del lado nativo que Tauri no da solo.
 class MainActivity : TauriActivity() {
 
@@ -24,7 +24,7 @@ class MainActivity : TauriActivity() {
     /// referencia a la Activity: apuntaria a una WebView muerta despues del
     /// primer reload. Resuelve contra la Activity viva en cada toque.
     companion object {
-        private const val TAG = "Sway"
+        private const val TAG = "Trak"
 
         @Volatile
         private var live: MainActivity? = null
@@ -36,7 +36,7 @@ class MainActivity : TauriActivity() {
         /// button doing nothing.
         fun dispatchMediaButton(button: String): Boolean {
             Log.i(TAG, "boton multimedia: $button")
-            return eval("window.__swayMediaButton && window.__swayMediaButton('$button')")
+            return eval("window.__trakMediaButton && window.__trakMediaButton('$button')")
         }
 
         private fun eval(js: String): Boolean {
@@ -51,7 +51,7 @@ class MainActivity : TauriActivity() {
 
     override fun onWebViewCreate(webView: WebView) {
         this.webView = webView
-        // Sway es una app, no una pagina: el pinch y el doble tap no tienen
+        // Trak es una app, no una pagina: el pinch y el doble tap no tienen
         // que escalar la UI. El meta viewport ya lo pide, esto lo garantiza
         // aunque el WebView decida ignorarlo.
         webView.settings.setSupportZoom(false)
@@ -72,7 +72,7 @@ class MainActivity : TauriActivity() {
     private fun acquireMulticastLock() {
         if (multicastLock != null) return
         val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-        multicastLock = wifi?.createMulticastLock("sway-mdns")?.apply {
+        multicastLock = wifi?.createMulticastLock("trak-mdns")?.apply {
             setReferenceCounted(false)
             runCatching { acquire() }
                 .onSuccess { Log.i(TAG, "MulticastLock tomado (mDNS puede recibir)") }
@@ -109,7 +109,7 @@ class MainActivity : TauriActivity() {
         }
 
         if (name.isNotEmpty()) {
-            runCatching { Os.setenv("SWAY_DEVICE_NAME", name, true) }
+            runCatching { Os.setenv("TRAK_DEVICE_NAME", name, true) }
                 .onSuccess { Log.i(TAG, "nombre del dispositivo: $name") }
                 .onFailure { Log.w(TAG, "no se pudo exportar el nombre: $it") }
         }
@@ -174,12 +174,12 @@ class MainActivity : TauriActivity() {
         // ForegroundServiceStartNotAllowedException. La app usa esta senal
         // para adelantar el cambio de track y no pisar nunca ese estado (ver
         // nativeAudio.ts).
-        eval("window.__swayAppVisible && window.__swayAppVisible(false)")
+        eval("window.__trakAppVisible && window.__trakAppVisible(false)")
     }
 
     override fun onResume() {
         super.onResume()
-        eval("window.__swayAppVisible && window.__swayAppVisible(true)")
+        eval("window.__trakAppVisible && window.__trakAppVisible(true)")
     }
 
     /// Anterior/siguiente de la notificacion y el lockscreen -> la app.
@@ -198,7 +198,7 @@ class MainActivity : TauriActivity() {
     /// perdia sin aviso. El hook vive ahora adentro del fork
     /// (`crates/native-audio`), que lo re-aplica en cada swap.
     ///
-    /// Del lado JS lo recibe `window.__swayMediaButton` (ver App.tsx).
+    /// Del lado JS lo recibe `window.__trakMediaButton` (ver App.tsx).
     private fun installTransportInterceptor() {
         NativeAudioRuntime.transportInterceptor = { button -> dispatchMediaButton(button) }
     }

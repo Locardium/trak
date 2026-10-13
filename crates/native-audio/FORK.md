@@ -1,4 +1,4 @@
-# `tauri-plugin-native-audio` — Sway fork
+# `tauri-plugin-native-audio` — Trak fork
 
 Vendored from crates.io `tauri-plugin-native-audio` 1.0.5
 (<https://github.com/uvarov-frontend/tauri-plugin-native-audio>, MIT OR
@@ -9,7 +9,7 @@ Apache-2.0). The licence files are kept next to this one.
 Upstream's whole API is `initialize / setSource / play / pause / seekTo /
 setRate / getState / getProgressCheckpoint / clearProgressCheckpoint / dispose /
 addStateListener`. That is one media item and no volume, which blocks four
-things Sway wants on Android:
+things Trak wants on Android:
 
 - **volume and per-track gain** — the app's volume slider was hidden on Android
   (`showVolume={!isAndroid()}`) because there was nothing to call.
@@ -90,7 +90,7 @@ The `MediaSession` follows the active deck, and the notification's
 
 Upstream's session player routes `seekToNext`/`seekToPrevious` to
 `seekForward`/`seekBack` — 10-second jumps, never a track change — with no way
-to reconfigure it. Sway used to work around that from `MainActivity` by
+to reconfigure it. Trak used to work around that from `MainActivity` by
 replacing `mediaSession.player` with its own `ForwardingPlayer` after polling
 for the session to exist. That breaks the moment the runtime swaps decks,
 because the replacement is silently dropped.
@@ -108,5 +108,5 @@ transition happened — there is no `ended` event between items any more.
 ## iOS
 
 Untouched, and it does **not** implement the new commands: they reject there.
-Sway is Android-only on mobile (`isAndroid()` in `app/src/platform.ts`), and the
+Trak is Android-only on mobile (`isAndroid()` in `app/src/platform.ts`), and the
 Swift sources are kept verbatim only so the crate still builds for that target.

@@ -65,9 +65,9 @@ pub fn generate_xml(conn: &Connection, music_dir: &Path) -> Result<String> {
         "\t<key>Library Persistent ID</key><string>{}</string>\n",
         fnv1a_hex(&music_dir.to_string_lossy())
     ));
-    // Marks that this file was written by Sway (not real iTunes). xml_sync
+    // Marks that this file was written by Trak (not real iTunes). xml_sync
     // uses it to decide whether to back up before overwriting the file.
-    xml.push_str("\t<key>Sway Generator</key><true/>\n");
+    xml.push_str("\t<key>Trak Generator</key><true/>\n");
 
     xml.push_str("\t<key>Tracks</key>\n\t<dict>\n");
     for t in &tracks {
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn doctype_matches_apple_itunes_exact() {
         let conn = mem();
-        let xml = generate_xml(&conn, &PathBuf::from(r"C:\Music\Sway")).unwrap();
+        let xml = generate_xml(&conn, &PathBuf::from(r"C:\Music\Trak")).unwrap();
         assert!(xml.contains("-//Apple Computer//DTD PLIST 1.0//EN"));
         assert!(!xml.contains("-//Apple//DTD"));
     }
@@ -489,16 +489,16 @@ mod tests {
     #[test]
     fn music_folder_comes_after_playlists_array() {
         let conn = mem();
-        let xml = generate_xml(&conn, &PathBuf::from(r"C:\Music\Sway")).unwrap();
+        let xml = generate_xml(&conn, &PathBuf::from(r"C:\Music\Trak")).unwrap();
         let playlists_close = xml.find("</array>\n\t<key>Music Folder</key>");
         assert!(playlists_close.is_some(), "Music Folder must come right after the Playlists closing tag");
     }
 
     #[test]
-    fn contains_sway_generator_marker() {
+    fn contains_trak_generator_marker() {
         let conn = mem();
-        let xml = generate_xml(&conn, &PathBuf::from(r"C:\Music\Sway")).unwrap();
-        assert!(xml.contains("<key>Sway Generator</key><true/>"));
+        let xml = generate_xml(&conn, &PathBuf::from(r"C:\Music\Trak")).unwrap();
+        assert!(xml.contains("<key>Trak Generator</key><true/>"));
     }
 
     #[test]
@@ -512,7 +512,7 @@ mod tests {
         db::add_tracks_to_playlist(&mut conn, p1, &[t1]).unwrap();
         db::add_tracks_to_playlist(&mut conn, p2, &[t2]).unwrap();
 
-        let xml = generate_xml(&conn, &PathBuf::from(r"C:\Music\Sway")).unwrap();
+        let xml = generate_xml(&conn, &PathBuf::from(r"C:\Music\Trak")).unwrap();
         let folder_persist = persistent_id_playlist(folder);
         let folder_block_start = xml.find(&folder_persist).unwrap();
         let folder_block = &xml[folder_block_start..];
@@ -543,7 +543,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let xml = generate_xml(&conn, &PathBuf::from(r"C:\Music\Sway")).unwrap();
+        let xml = generate_xml(&conn, &PathBuf::from(r"C:\Music\Trak")).unwrap();
         let first = xml.find("<key>Track ID</key><integer>1</integer>").unwrap();
         let second = xml.find("<key>Track ID</key><integer>2</integer>").unwrap();
         assert!(first < second, "tracks must come out in ascending id order");
@@ -565,8 +565,8 @@ mod tests {
     fn persistent_ids_are_stable_across_calls() {
         let conn = mem();
         add_track(&conn, r"C:\Music\a.flac", "A");
-        let xml1 = generate_xml(&conn, &PathBuf::from(r"C:\Music\Sway")).unwrap();
-        let xml2 = generate_xml(&conn, &PathBuf::from(r"C:\Music\Sway")).unwrap();
+        let xml1 = generate_xml(&conn, &PathBuf::from(r"C:\Music\Trak")).unwrap();
+        let xml2 = generate_xml(&conn, &PathBuf::from(r"C:\Music\Trak")).unwrap();
         assert_eq!(xml1, xml2);
     }
 }

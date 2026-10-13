@@ -1,6 +1,6 @@
-# sway-server
+# trak-server
 
-Sway's archive and sync server. Stores whatever devices send it and hands it
+Trak's archive and sync server. Stores whatever devices send it and hands it
 back when they ask for it. **It doesn't import music on its own and has no
 interface**: everything it has, someone sent it.
 
@@ -17,10 +17,10 @@ What it's for, in two concrete cases:
 ## Building
 
 ```
-cargo build --release -p sway-server
+cargo build --release -p trak-server
 ```
 
-The binary ends up in `target/release/sway-server` (`.exe` on Windows). It
+The binary ends up in `target/release/trak-server` (`.exe` on Windows). It
 doesn't depend on anything from the system: no graphical environment, no
 webview, no SQLite installation needed.
 
@@ -41,11 +41,11 @@ rustup target add x86_64-unknown-linux-musl
 Each time:
 
 ```
-cargo zigbuild --release -p sway-server --target x86_64-unknown-linux-musl
+cargo zigbuild --release -p trak-server --target x86_64-unknown-linux-musl
 ```
 
 A single file comes out at
-`target/x86_64-unknown-linux-musl/release/sway-server`, and it's the only
+`target/x86_64-unknown-linux-musl/release/trak-server`, and it's the only
 thing that needs to be copied over.
 
 **musl and not gnu** on purpose: the binary ends up statically linked, with
@@ -61,7 +61,7 @@ compiled for the target.
 ## Running
 
 ```
-./sway-server [config-path]
+./trak-server [config-path]
 ```
 
 With no argument it uses `config.toml` from the current directory. The first
@@ -70,7 +70,7 @@ opening the port:
 
 ```toml
 listen = "0.0.0.0:7420"
-name = "Sway Server"
+name = "Trak Server"
 data_dir = "data"
 music_dir = "music"
 retention_days = 90
@@ -91,7 +91,7 @@ pair_token = "..."
   unpairs every device paired with the old one: on its next connection the
   app is told it's no longer paired, forgets the server, and has to pair
   again with the new token. It can also be passed via the
-  `SWAY_SERVER_TOKEN` environment variable, which overrides the file's value:
+  `TRAK_SERVER_TOKEN` environment variable, which overrides the file's value:
   in a deployment it's best for the secret not to live in a file that could
   end up in a repo.
 
@@ -101,8 +101,8 @@ The server and the apps speak a versioned sync protocol. The startup log says
 which one (`protocol 2 (accepts 2+)`). When a device connects with a protocol
 out of range, nothing syncs and both sides say who has to update: the app
 shows **Update needed** on the server, and the server logs a line like
-`... runs a newer Sway (...): update sway-server` or
-`... runs an older Sway (...): update the app on that device`.
+`... runs a newer Trak (...): update trak-server` or
+`... runs an older Trak (...): update the app on that device`.
 
 ## What it stores
 
@@ -160,13 +160,13 @@ long as they used to. It's best to update the server before the app.
 
 ```ini
 [Unit]
-Description=Sway sync server
+Description=Trak sync server
 After=network-online.target
 
 [Service]
-User=sway
-WorkingDirectory=/var/lib/sway
-ExecStart=/usr/local/bin/sway-server /var/lib/sway/config.toml
+User=trak
+WorkingDirectory=/var/lib/trak
+ExecStart=/usr/local/bin/trak-server /var/lib/trak/config.toml
 Restart=on-failure
 
 [Install]

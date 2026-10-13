@@ -1,9 +1,10 @@
 {
-  "name": "sway",
+  "name": "trak",
   "private": true,
+  "license": "BUSL-1.1",
   "version": "1.0.0-1",
   "type": "module",
-  "description": "Sway",
+  "description": "Trak",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",

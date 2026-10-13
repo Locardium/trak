@@ -176,7 +176,7 @@ pub fn peer_came_online(handle: &AppHandle, uid: &str) {
         let Some(platform) = found else { return };
         platform
     };
-    let remote = platform == sway_core::pairing::PLATFORM_SERVER;
+    let remote = platform == trak_core::pairing::PLATFORM_SERVER;
     // A server with a watcher catches up on its own, and better: it asks
     // with the revision it already knew and syncs only if something was
     // really missed. Also launching the sync here would mean a full run
@@ -230,7 +230,7 @@ pub(crate) fn lan_peers(handle: &AppHandle) -> Vec<String> {
         .merged_list(&conn)
         .into_iter()
         .filter(|p| p.paired && p.online && p.invalid.is_none() && p.update.is_none())
-        .filter(|p| p.platform != sway_core::pairing::PLATFORM_SERVER)
+        .filter(|p| p.platform != trak_core::pairing::PLATFORM_SERVER)
         .map(|p| p.uid)
         .collect()
 }
@@ -326,7 +326,7 @@ pub fn spawn(handle: AppHandle) {
             // first time over the slow path.
             let (servers, lan): (Vec<_>, Vec<_>) = peers
                 .into_iter()
-                .partition(|(_, platform)| platform == sway_core::pairing::PLATFORM_SERVER);
+                .partition(|(_, platform)| platform == trak_core::pairing::PLATFORM_SERVER);
             let mut servers: Vec<String> = servers.into_iter().map(|(uid, _)| uid).collect();
             let lan: Vec<String> = lan.into_iter().map(|(uid, _)| uid).collect();
 

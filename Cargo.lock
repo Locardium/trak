@@ -4309,71 +4309,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
-name = "sway"
-version = "1.0.0-1"
-dependencies = [
- "android_logger",
- "anyhow",
- "base64 0.22.1",
- "drag",
- "ebur128",
- "env_logger",
- "image",
- "lofty",
- "log",
- "mdns-sd",
- "notify-debouncer-mini",
- "rodio",
- "rusqlite",
- "serde",
- "serde_json",
- "starship-battery",
- "sway-core",
- "symphonia",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-native-audio",
- "tauri-plugin-os",
- "tauri-plugin-single-instance",
- "windows 0.58.0",
-]
-
-[[package]]
-name = "sway-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "blake3",
- "flate2",
- "lofty",
- "log",
- "rusqlite",
- "serde",
- "serde_json",
- "snow",
- "trash",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "sway-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "env_logger",
- "log",
- "serde",
- "sway-core",
- "toml 0.8.2",
- "uuid",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "swift-rs"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5364,6 +5299,71 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "trak"
+version = "1.0.0-1"
+dependencies = [
+ "android_logger",
+ "anyhow",
+ "base64 0.22.1",
+ "drag",
+ "ebur128",
+ "env_logger",
+ "image",
+ "lofty",
+ "log",
+ "mdns-sd",
+ "notify-debouncer-mini",
+ "rodio",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "starship-battery",
+ "symphonia",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-native-audio",
+ "tauri-plugin-os",
+ "tauri-plugin-single-instance",
+ "trak-core",
+ "windows 0.58.0",
+]
+
+[[package]]
+name = "trak-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "blake3",
+ "flate2",
+ "lofty",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "snow",
+ "trash",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "trak-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "serde",
+ "toml 0.8.2",
+ "trak-core",
+ "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

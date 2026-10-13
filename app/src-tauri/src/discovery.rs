@@ -1,4 +1,4 @@
-//! Discovery of Sway devices on the local network (mDNS / Bonjour).
+//! Discovery of Trak devices on the local network (mDNS / Bonjour).
 //!
 //! Phase 5.1: discovery ONLY. Publishes this device and listens for others;
 //! it doesn't connect, doesn't transfer, and doesn't trust anyone. Encrypted
@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
-pub const SERVICE_TYPE: &str = "_sway._tcp.local.";
+pub const SERVICE_TYPE: &str = "_trak._tcp.local.";
 
 /// What to tell the user when one of the two has to update (2.8), naming
 /// who. `their_app` is the other side's app version, when known.
@@ -32,11 +32,11 @@ pub fn update_note(name: &str, platform: &str, peer_is_older: bool, their_app: &
         format!(" ({their_app})")
     };
     if !peer_is_older {
-        format!("{name} runs a newer version of Sway{theirs} — update this app")
-    } else if platform == sway_core::pairing::PLATFORM_SERVER {
-        format!("{name} runs an older Sway Server{theirs} — update sway-server")
+        format!("{name} runs a newer version of Trak{theirs} — update this app")
+    } else if platform == trak_core::pairing::PLATFORM_SERVER {
+        format!("{name} runs an older Trak Server{theirs} — update trak-server")
     } else {
-        format!("{name} runs an older version of Sway{theirs} — update it there")
+        format!("{name} runs an older version of Trak{theirs} — update it there")
     }
 }
 
@@ -45,9 +45,9 @@ pub fn update_note(name: &str, platform: &str, peer_is_older: bool, their_app: &
 fn announced_update(name: &str, platform: &str, proto: &str, min: &str) -> Option<String> {
     let theirs: u32 = proto.parse().unwrap_or(0);
     let their_min: u32 = min.parse().unwrap_or(theirs);
-    match sway_core::wire::compat(theirs, their_min) {
-        sway_core::wire::Compat::Ok => None,
-        c => Some(update_note(name, platform, c == sway_core::wire::Compat::PeerOlder, "")),
+    match trak_core::wire::compat(theirs, their_min) {
+        trak_core::wire::Compat::Ok => None,
+        c => Some(update_note(name, platform, c == trak_core::wire::Compat::PeerOlder, "")),
     }
 }
 
@@ -431,13 +431,13 @@ pub fn start(
         ("uid".to_string(), uid.to_string()),
         ("name".to_string(), name.to_string()),
         ("platform".to_string(), platform_name()),
-        ("proto".to_string(), sway_core::wire::PROTOCOL.to_string()),
-        ("minproto".to_string(), sway_core::wire::MIN_PROTOCOL.to_string()),
+        ("proto".to_string(), trak_core::wire::PROTOCOL.to_string()),
+        ("minproto".to_string(), trak_core::wire::MIN_PROTOCOL.to_string()),
     ]);
     let info = ServiceInfo::new(
         SERVICE_TYPE,
         &short,
-        &format!("sway-{short}.local."),
+        &format!("trak-{short}.local."),
         "",
         port,
         props,
@@ -779,7 +779,7 @@ mod tests {
 
     fn seen(peers: &Peers, uid: &str, name: &str) -> Seen {
         peers.upsert(
-            format!("{uid}._sway._tcp.local."),
+            format!("{uid}._trak._tcp.local."),
             Peer {
                 uid: uid.into(),
                 name: name.into(),
@@ -959,7 +959,7 @@ mod tests {
         assert!(!renamed.first_time);
 
         // Left the network and came back: now it does need to catch up again.
-        assert!(peers.remove_by_fullname("peer-1._sway._tcp.local."));
+        assert!(peers.remove_by_fullname("peer-1._trak._tcp.local."));
         assert!(seen(&peers, "peer-1", "Phone").first_time);
     }
 
@@ -967,7 +967,7 @@ mod tests {
     fn removed_peers_disappear() {
         let peers = Peers::default();
         seen(&peers, "peer-1", "Phone");
-        assert!(peers.remove_by_fullname("peer-1._sway._tcp.local."));
+        assert!(peers.remove_by_fullname("peer-1._trak._tcp.local."));
         assert!(peers.list().is_empty());
     }
 
@@ -980,7 +980,7 @@ mod tests {
         let peers = Peers::default();
         reachable_peer(&peers, "peer-1", "Phone");
 
-        assert!(peers.mark_gone_by_fullname("peer-1._sway._tcp.local."));
+        assert!(peers.mark_gone_by_fullname("peer-1._trak._tcp.local."));
         let list = peers.list();
         assert_eq!(list.len(), 1, "still in the list");
         assert!(!list[0].online, "but grey");
@@ -994,8 +994,8 @@ mod tests {
         assert!(peers.set_online("peer-1", true));
 
         // A second removal in a row doesn't re-emit: it was already grey.
-        assert!(peers.mark_gone_by_fullname("peer-1._sway._tcp.local."));
-        assert!(!peers.mark_gone_by_fullname("peer-1._sway._tcp.local."));
+        assert!(peers.mark_gone_by_fullname("peer-1._trak._tcp.local."));
+        assert!(!peers.mark_gone_by_fullname("peer-1._trak._tcp.local."));
     }
 
     /// A grey peer that re-announces has to be probed again: it could have
@@ -1004,7 +1004,7 @@ mod tests {
     fn a_grey_peer_that_comes_back_is_a_catch_up_trigger() {
         let peers = Peers::default();
         reachable_peer(&peers, "peer-1", "Phone");
-        peers.mark_gone_by_fullname("peer-1._sway._tcp.local.");
+        peers.mark_gone_by_fullname("peer-1._trak._tcp.local.");
 
         let back = seen(&peers, "peer-1", "Phone");
         assert!(back.first_time, "was grey: could have been for hours");

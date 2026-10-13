@@ -1067,7 +1067,7 @@ mod tests {
     impl Device {
         fn new(tag: &str) -> Self {
             let dir = std::env::temp_dir().join(format!(
-                "sway-eng-{tag}-{}-{:?}",
+                "trak-eng-{tag}-{}-{:?}",
                 std::process::id(),
                 std::thread::current().id()
             ));
@@ -1197,7 +1197,7 @@ mod tests {
         }
 
         /// Audio files in the managed folder (excluding trash and partials,
-        /// which live in `.sway-*` subdirectories).
+        /// which live in `.trak-*` subdirectories).
         fn audio_files(&self) -> Vec<PathBuf> {
             let mut v: Vec<PathBuf> = std::fs::read_dir(&self.dir)
                 .unwrap()

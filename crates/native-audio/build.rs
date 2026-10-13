@@ -16,7 +16,7 @@ const COMMANDS: &[&str] = &[
     "get_progress_checkpoint",
     "clear_progress_checkpoint",
     "dispose",
-    // Added by the Sway fork, see FORK.md.
+    // Added by the Trak fork, see FORK.md.
     "set_volume",
     "set_source_gain",
     "set_next_source",
@@ -25,7 +25,7 @@ const COMMANDS: &[&str] = &[
     "list_output_devices",
     "set_output_device",
     // Battery-optimization exemption (Fase 1.3). Not audio-specific, but this
-    // is the only Android plugin Sway has wired up, and it exists for the
+    // is the only Android plugin Trak has wired up, and it exists for the
     // same reason as everything else here: without it Android can freeze or
     // kill the process this plugin's foreground service runs in, which is
     // what silently drops transport buttons pressed after that point — see

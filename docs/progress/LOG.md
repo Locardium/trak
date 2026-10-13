@@ -5,6 +5,44 @@
 
 ---
 
+## 2026-10-13 · 5.3 rename Sway → Trak (sin commit)
+
+- Reemplazo mecánico en archivos trackeados (sin `docs/`, `tools/`, `graphify-out/`,
+  `Cargo.lock`): `com.locardium.sway` → `com.locardium.trak.player`, `com.sway.app` →
+  `com.trak.app` (buildSrc), y `sway/Sway/SWAY` → `trak/Trak/TRAK`. 65 archivos.
+- `git mv` de `MainActivity.kt` a `gen/android/app/src/main/java/com/locardium/trak/player/` y
+  de `buildSrc/.../com/sway/app/kotlin` a `com/trak/app/kotlin`. Borrado el `generated/` viejo
+  (ignorado por git, lo regenera el CLI de Tauri).
+- `blake3::derive_key("trak pairing token v1")` en `crates/core/src/pairing.rs`: primero se
+  dejó en "sway", el usuario pidió cambiarlo. Efecto: los `token_hash` guardados en el server
+  ya no coinciden → el device ve "Pairing broken" (flujo de 2.3) y se re-empareja una vez. No es
+  silencioso, y con `MIN_PROTOCOL` = 3 hay que actualizar todo igual.
+- `PRODUCT.md`: sacado "evoking sway (movement, water)", ya no aplica.
+- Borrado `flatten_legacy_subdir` de `app/src-tauri/src/lib.rs` (migración Android de
+  `<managed>/Sway`; con app id nuevo no existe ese layout).
+- `wire::PROTOCOL` y `MIN_PROTOCOL` = 3 (mDNS `_trak._tcp`: un Sway viejo ya no se ve; por
+  conexión directa sale "Update needed"). Huella: mismos mensajes, sólo cambia el número.
+- Verificado: `cargo test -p trak-core` (139 ok), `-p trak-server`, `-p trak` (57 ok),
+  `pnpm tsc --noEmit`. Sin probar Android ni el release.
+- Gotchas para el usuario: el server lee ahora `trak-server.toml` y `TRAK_SERVER_TOKEN`
+  (renombrar su config a mano); el keystore de release sigue siendo `sway-release.keystore`,
+  alias `sway` en `key.properties` (no trackeado, no se tocó; firma igual).
+
+## 2026-10-13 · Fase 5 ampliada (5.3 rename, 5.4 portable/instalable) + 5.5 licencia BSL 1.1
+
+- Pedidos nuevos en Fase 5: rename Sway → Trak (5.3), build portable + instalable con datos
+  junto al exe y fuera de `<Music>` (5.4), licencia BSL 1.1 (5.5). Decisiones en STATUS/PLAN.
+- 5.5 hecho, sin commit: `LICENSE` nuevo (texto bajado de
+  `raw.githubusercontent.com/spdx/license-list-data/main/text/BUSL-1.1.txt`; verificado con diff
+  que la sección Terms quedó idéntica), `README.md` sección License, `license = "BUSL-1.1"` en
+  `crates/core`, `crates/server`, `app/src-tauri` Cargo.toml y en `package.json`/`app/package.json`.
+  `cargo metadata` OK.
+- Gotcha legal: BSL no deja que el Additional Use Grant restrinja los derechos base, y la base
+  ya permite copiar y redistribuir (uso no productivo). "Prohibido vender binarios" no es 100%
+  exigible con BSL: quien los compre sólo podría usarlos dentro del grant. Si importa, la
+  alternativa es PolyForm Noncommercial. Change Date y Change License (compatible con GPL) son
+  obligatorios en BSL: se eligió 4 años → Apache 2.0.
+
 ## 2026-10-13 · Fase 2 cerrada en device
 
 - Usuario: 2.8 "listo perfecto" (badge "Update needed" + línea en el log del server). 2.11 no

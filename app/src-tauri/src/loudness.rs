@@ -276,7 +276,7 @@ mod tests {
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("sway-loudness-{}-{name}.wav", std::process::id()));
+        p.push(format!("trak-loudness-{}-{name}.wav", std::process::id()));
         p
     }
 

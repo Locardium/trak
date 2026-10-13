@@ -1,4 +1,4 @@
-//! Encrypted channel between two Sway devices (Phase 5.2).
+//! Encrypted channel between two Trak devices (Phase 5.2).
 //!
 //! **Noise XX** handshake (`Noise_XX_25519_ChaChaPoly_BLAKE2s`) over TCP.
 //! XX exchanges the static keys of both sides, so after the handshake each
@@ -31,10 +31,10 @@ const PARAMS: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 /// only `PROTOCOL`; the newer side gates them with `peer_protocol >= N`.
 /// Breaking ones also raise `MIN_PROTOCOL` to the new value. The test
 /// `tests::protocol_fingerprint` fails when a message changes without a bump.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 /// The oldest protocol this build can still sync with.
-pub const MIN_PROTOCOL: u32 = 2;
+pub const MIN_PROTOCOL: u32 = 3;
 
 /// First frame each side sends after the Noise handshake, before any `Msg`.
 /// Not a `Msg` on purpose: with different protocols even `Hello` may not
@@ -572,7 +572,7 @@ fn read_frame(mut stream: &TcpStream) -> Result<Vec<u8>> {
     stream.read_exact(&mut len)?;
     if let Some(what) = looks_like_http(&len) {
         return Err(anyhow!(
-            "that port is a web server, not a Sway server (it answered {what})"
+            "that port is a web server, not a Trak server (it answered {what})"
         ));
     }
     let len = u32::from_be_bytes(len) as usize;
@@ -813,7 +813,7 @@ mod tests {
     /// The fingerprint of everything that travels, and the protocol it
     /// belongs to. When it changes, the protocol has to change with it.
     const FINGERPRINT: (u32, &str) =
-        (2, "f10c24bafbdd1179c9f24b70700fdb130dd040792efa8090dfabb1ef843c4951");
+        (3, "f10c24bafbdd1179c9f24b70700fdb130dd040792efa8090dfabb1ef843c4951");
 
     /// Changing a message without bumping the protocol breaks an update in
     /// silence: an old peer fails to parse, or worse, parses something else.

@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! 1. request the file from byte N (N = whatever is already in the .part)
-//! 2. write to  <sway>/incoming/<hash>.part
+//! 2. write to  <trak>/incoming/<hash>.part
 //! 3. network cut / app killed -> the .part survives, resumes from there
 //! 4. complete -> blake3 of the WHOLE .part
 //!      different  -> the .part is deleted, the library was never touched
@@ -416,7 +416,7 @@ mod tests {
 
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
-            "sway-xfer-{tag}-{}-{:?}",
+            "trak-xfer-{tag}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

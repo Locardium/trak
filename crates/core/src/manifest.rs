@@ -643,7 +643,7 @@ mod weight {
 
     /// How much the inventory that travels on EVERY sync weighs, whether
     /// anything changed or not. This isn't an assertion, it's a measurement:
-    /// run it with `cargo test -p sway-core -- --ignored --nocapture weight`.
+    /// run it with `cargo test -p trak-core -- --ignored --nocapture weight`.
     ///
     /// It matters because the inventory doesn't depend on what changed but
     /// on what exists: a library sitting still costs exactly the same as one

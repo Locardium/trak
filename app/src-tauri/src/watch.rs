@@ -39,7 +39,7 @@ use crate::AppState;
 use std::collections::HashSet;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
-use sway_core::wire::{Mark, Msg};
+use trak_core::wire::{Mark, Msg};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// How long to wait for a heartbeat before declaring the connection dead.
@@ -314,7 +314,7 @@ fn servers_to_watch(handle: &AppHandle) -> Vec<String> {
         let Ok(mut stmt) = conn.prepare("SELECT uid FROM devices WHERE platform = ?1") else {
             return Vec::new();
         };
-        let rows = stmt.query_map([sway_core::pairing::PLATFORM_SERVER], |r| r.get(0));
+        let rows = stmt.query_map([trak_core::pairing::PLATFORM_SERVER], |r| r.get(0));
         match rows {
             Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
             Err(_) => Vec::new(),
@@ -557,7 +557,7 @@ fn nap(handle: &AppHandle, uid: &str, max: Duration) {
 fn stored_mark(handle: &AppHandle, uid: &str) -> Option<Mark> {
     let state = handle.state::<AppState>();
     let conn = state.db.lock().ok()?;
-    sway_core::pairing::watch_mark(&conn, uid)
+    trak_core::pairing::watch_mark(&conn, uid)
 }
 
 /// Saves it. Only when it changed: the heartbeat arrives every 25 seconds
@@ -567,7 +567,7 @@ fn stored_mark(handle: &AppHandle, uid: &str) -> Option<Mark> {
 fn remember_mark(handle: &AppHandle, uid: &str, mark: Option<Mark>) {
     let state = handle.state::<AppState>();
     let Ok(conn) = state.db.lock() else { return };
-    if let Err(e) = sway_core::pairing::set_watch_mark(&conn, uid, mark) {
+    if let Err(e) = trak_core::pairing::set_watch_mark(&conn, uid, mark) {
         log::debug!("[watch] could not store the mark of {uid}: {e}");
     }
 }

@@ -14,12 +14,12 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use sway_core::engine::{self, Host, Progress};
-use sway_core::rusqlite::Connection;
-use sway_core::wire::{Mark, Msg, Session};
-use sway_core::{db, pairing};
-use sway_server::host::ServerHost;
-use sway_server::serve::{self, Server};
+use trak_core::engine::{self, Host, Progress};
+use trak_core::rusqlite::Connection;
+use trak_core::wire::{Mark, Msg, Session};
+use trak_core::{db, pairing};
+use trak_server::host::ServerHost;
+use trak_server::serve::{self, Server};
 
 const TOKEN: &str = "suite-token";
 /// No test moves more than a few kilobytes: if something is left waiting it's
@@ -28,7 +28,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn tmpdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "sway-int-{tag}-{}-{:?}",
+        "trak-int-{tag}-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
     ));
@@ -83,10 +83,10 @@ impl Device {
     fn add_track(&self, filename: &str, bytes: &[u8], title: &str) -> String {
         let path = self.dir.join(filename);
         std::fs::write(&path, bytes).unwrap();
-        let hash = sway_core::hashing::hash_file(&path).unwrap();
+        let hash = trak_core::hashing::hash_file(&path).unwrap();
         let uid = db::new_uid();
         let conn = self.db.lock().unwrap();
-        sway_core::transfer::insert_received(
+        trak_core::transfer::insert_received(
             &conn,
             &path,
             &uid,
@@ -253,8 +253,8 @@ impl Archive {
         // everything, in both directions.
         host.with_db(|c| {
             let me = db::this_device_uid(c)?;
-            sway_core::scope::set_mode(c, &me, sway_core::scope::Mode::All)?;
-            sway_core::scope::set_direction(c, &me, "both")?;
+            trak_core::scope::set_mode(c, &me, trak_core::scope::Mode::All)?;
+            trak_core::scope::set_direction(c, &me, "both")?;
             Ok(())
         })
         .unwrap();
@@ -304,7 +304,7 @@ impl Archive {
 
     /// What's left in the server's trash.
     fn trashed(&self) -> Vec<Vec<u8>> {
-        std::fs::read_dir(sway_core::trash::trash_dir(&self.dir))
+        std::fs::read_dir(trak_core::trash::trash_dir(&self.dir))
             .map(|rd| {
                 rd.flatten()
                     .filter(|e| e.path().is_file())

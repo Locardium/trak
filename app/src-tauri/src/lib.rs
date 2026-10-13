@@ -13,7 +13,7 @@ mod xml_sync;
 // the same names it had when it was all one crate: that way the
 // `crate::db::…` calls in the modules that stayed here still resolve the
 // same, and the extraction didn't have to touch the body of any file.
-pub use sway_core::{
+pub use trak_core::{
     db, device_info, engine, hashing, id3_sanitize, import, manifest, merge, perf_line, rank, scope,
     transfer, trash, wire,
 };
@@ -46,72 +46,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 /// webview profile), their own single-instance lock and their own name on
 /// the network. Otherwise running dev on the machine that has the release
 /// installed would work on — and sync from — the real library.
-pub(crate) const DATA_DIR: &str = if cfg!(debug_assertions) { "Sway Dev" } else { "Sway" };
-
-/// One-time migration: on Android tracks used to live in
-/// `<managed folder>/Sway`, one level too deep — the managed folder is
-/// already private to the app (`…/files/Music`), so that subdirectory
-/// wasn't separating anything. Whatever was inside gets moved up one level.
-///
-/// The stored paths are absolute: if they're not updated along with the
-/// files, every track ends up pointing at something that's no longer there.
-/// Never deletes anything — on a name clash it disambiguates, the same as
-/// import does.
-#[cfg(target_os = "android")]
-fn flatten_legacy_subdir(conn: &Connection, music_dir: &std::path::Path) -> anyhow::Result<()> {
-    let legacy = music_dir.join("Sway");
-    if !legacy.is_dir() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(&legacy)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let from = entry.path();
-        let name = entry.file_name();
-        let mut to = music_dir.join(&name);
-        if to.exists() {
-            let stem = std::path::Path::new(&name)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("track")
-                .to_string();
-            let ext = std::path::Path::new(&name)
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            let mut i = 2;
-            loop {
-                let cand = if ext.is_empty() {
-                    music_dir.join(format!("{stem} ({i})"))
-                } else {
-                    music_dir.join(format!("{stem} ({i}).{ext}"))
-                };
-                if !cand.exists() {
-                    to = cand;
-                    break;
-                }
-                i += 1;
-            }
-        }
-        std::fs::rename(&from, &to)?;
-        conn.execute(
-            "UPDATE tracks SET path = ?1 WHERE path = ?2",
-            rusqlite::params![to.to_string_lossy(), from.to_string_lossy()],
-        )?;
-        eprintln!("[lib] migrated: {} -> {}", from.display(), to.display());
-    }
-    // Only delete the directory if it ended up empty.
-    std::fs::remove_dir(&legacy).ok();
-    Ok(())
-}
-
-#[cfg(not(target_os = "android"))]
-fn flatten_legacy_subdir(_conn: &Connection, _music_dir: &std::path::Path) -> anyhow::Result<()> {
-    Ok(())
-}
+pub(crate) const DATA_DIR: &str = if cfg!(debug_assertions) { "Trak Dev" } else { "Trak" };
 
 /// TEMPORARY — diagnostics.
 ///
@@ -176,9 +111,9 @@ pub struct AppState {
     db_read: Mutex<Connection>,
     player: Player,
     covers: cover::Covers,
-    /// Managed folder (<Music>/Sway): everything imported is copied here.
+    /// Managed folder (<Music>/Trak): everything imported is copied here.
     music_dir: PathBuf,
-    /// Sway devices seen on the local network (Phase 5.1).
+    /// Trak devices seen on the local network (Phase 5.1).
     peers: discovery::Peers,
     /// Keeping the daemon alive is what keeps the service published.
     mdns: Mutex<Option<mdns_sd::ServiceDaemon>>,
@@ -1041,7 +976,7 @@ fn set_device_name(state: State<AppState>, name: String) -> Result<(), String> {
     db::set_device_name(&conn, &name).map_err(|e| e.to_string())
 }
 
-/// Sway devices visible on the local network. The frontend calls this when
+/// Trak devices visible on the local network. The frontend calls this when
 /// opening the sync section and every time the `peers-changed` event
 /// arrives.
 #[tauri::command]
@@ -1162,9 +1097,9 @@ fn unpair_device(app: AppHandle, uid: String) -> Result<(), String> {
 /// Deletions a peer made while it wasn't linked to this device, held for the
 /// user (2.7, see `merge::pending_deletes`).
 #[tauri::command]
-fn pending_deletes(state: State<AppState>) -> Result<Vec<sway_core::merge::PendingDeletes>, String> {
+fn pending_deletes(state: State<AppState>) -> Result<Vec<trak_core::merge::PendingDeletes>, String> {
     let conn = state.db.lock().unwrap();
-    sway_core::merge::pending_deletes(&conn).map_err(|e| e.to_string())
+    trak_core::merge::pending_deletes(&conn).map_err(|e| e.to_string())
 }
 
 /// The answer to `pending_deletes` for one device: delete here too, or keep
@@ -1178,7 +1113,7 @@ fn resolve_pending_deletes(
 ) -> Result<usize, String> {
     let n = {
         let conn = state.db.lock().unwrap();
-        sway_core::merge::resolve_pending(&conn, &state.music_dir, &device_uid, keep)
+        trak_core::merge::resolve_pending(&conn, &state.music_dir, &device_uid, keep)
             .map_err(|e| e.to_string())?
     };
     pairing::emit_library_changed(&app, true);
@@ -1554,8 +1489,8 @@ fn set_auto_sync_xml(state: State<AppState>, enabled: bool) -> Result<(), String
 }
 
 /// Small pieces of UI state the frontend owns (column layout, and whatever
-/// comes next). They go through the db so they land in `<Music>/Sway`, next
-/// to everything else Sway owns — the webview's own `localStorage` would put
+/// comes next). They go through the db so they land in `<Music>/Trak`, next
+/// to everything else Trak owns — the webview's own `localStorage` would put
 /// them under AppData, which is the one place none of our data belongs.
 ///
 /// Local to this device on purpose: the shape of your table is not something
@@ -1579,7 +1514,7 @@ fn ui_key(key: &str) -> String {
     format!("ui.{key}")
 }
 
-/// Empties `%LOCALAPPDATA%\com.locardium.sway`, once, the first time a build
+/// Empties `%LOCALAPPDATA%\com.locardium.trak.player`, once, the first time a build
 /// that keeps the webview profile in the music folder runs.
 ///
 /// Only `Local Storage` is carried across, and for one reason: it holds the
@@ -1710,7 +1645,7 @@ fn set_auto_sync_p2p(state: State<AppState>, enabled: bool) -> Result<(), String
 
 /// Fills in `rel_path` (the file's name within the managed folder) on rows
 /// that don't have it. `path` is absolute and therefore local:
-/// `E:\...\Sway\x.flac` on the PC and `/storage/.../Music/x.flac` on the
+/// `E:\...\Trak\x.flac` on the PC and `/storage/.../Music/x.flac` on the
 /// phone. What travels between devices is `rel_path`; the absolute path is
 /// rebuilt on each one. Legacy tracks from outside the managed folder are
 /// left without `rel_path` — they aren't syncable until they're
@@ -1930,7 +1865,7 @@ pub fn run() {
         android_logger::Config::default()
             .with_max_level(log::LevelFilter::Debug)
             .with_filter(android_logger::FilterBuilder::new().parse(LOG_FILTER).build())
-            .with_tag("sway"),
+            .with_tag("trak"),
     );
 
     #[allow(unused_mut)] // mut is only needed in the cfg blocks below
@@ -1960,9 +1895,9 @@ pub fn run() {
         .setup(|app| {
             // Travels with the protocol version, so a mismatch can say which
             // version the other side runs (2.8).
-            sway_core::wire::set_app_version(&app.package_info().version.to_string());
-            // Everything Sway owns lives next to the user's music, not in
-            // AppData: on desktop that's `<Music>/Sway`, so the db travels
+            trak_core::wire::set_app_version(&app.package_info().version.to_string());
+            // Everything Trak owns lives next to the user's music, not in
+            // AppData: on desktop that's `<Music>/Trak`, so the db travels
             // with the library instead of being orphaned on reinstall. On
             // Android `audio_dir()` is already private to the app
             // (`getExternalFilesDir(DIRECTORY_MUSIC)`), so no extra nesting.
@@ -1980,7 +1915,7 @@ pub fn run() {
             // name as the release on this PC.
             #[cfg(all(debug_assertions, not(any(target_os = "android", target_os = "ios"))))]
             if let Ok(pc) = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")) {
-                std::env::set_var("SWAY_DEVICE_NAME", format!("{} Dev", pc.trim()));
+                std::env::set_var("TRAK_DEVICE_NAME", format!("{} Dev", pc.trim()));
             }
             std::fs::create_dir_all(&dir).ok();
             let db_file = dir.join("db.sqlite");
@@ -1988,7 +1923,7 @@ pub fn run() {
             // what's read is always from the current run.
             let perf = dir.join("perf.log");
             std::fs::write(&perf, "").ok();
-            sway_core::set_perf_file(perf);
+            trak_core::set_perf_file(perf);
             eprintln!("[db] file: {}", db_file.display());
             let conn = db::open(&db_file).expect("db open");
             // WAL checkpointing happens separately: see `db::open`, no
@@ -1999,7 +1934,7 @@ pub fn run() {
                 .unwrap_or(-1);
             eprintln!("[db] tracks at startup: {n}");
             // Managed folder for the actual audio files, kept apart from
-            // the db so browsing `Music/Sway` in a file manager shows a
+            // the db so browsing `Music/Trak` in a file manager shows a
             // clean `library` folder instead of db/log files mixed in.
             let music_dir = if cfg!(target_os = "android") {
                 dir.clone()
@@ -2016,9 +1951,6 @@ pub fn run() {
             } else {
                 dir.join("covers")
             };
-            if let Err(e) = flatten_legacy_subdir(&conn, &music_dir) {
-                eprintln!("[lib] managed folder migration failed: {e}");
-            }
             eprintln!("[lib] managed folder: {}", music_dir.display());
             match backfill_rel_paths(&conn, &music_dir) {
                 Ok(n) if n > 0 => eprintln!("[lib] rel_path filled in on {n} tracks"),
@@ -2128,7 +2060,7 @@ pub fn run() {
             // its own (`manager/webview.rs`: "we do respect
             // user-specification"). Without this, WebView2 keeps its whole
             // profile — cache, cookies, local storage — under
-            // `%LOCALAPPDATA%\com.locardium.sway`, and nothing Sway owns belongs
+            // `%LOCALAPPDATA%\com.locardium.trak.player`, and nothing Trak owns belongs
             // outside the music folder.
             //
             // Last thing in setup, after `manage`: the webview starts
@@ -2145,7 +2077,7 @@ pub fn run() {
                     "main",
                     tauri::WebviewUrl::default(),
                 )
-                .title(if cfg!(debug_assertions) { "Sway Dev" } else { "Sway" })
+                .title(if cfg!(debug_assertions) { "Trak Dev" } else { "Trak" })
                 .inner_size(1100.0, 720.0)
                 .min_inner_size(720.0, 480.0)
                 .data_directory(webview_dir)

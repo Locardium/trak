@@ -1157,7 +1157,7 @@ mod tests {
         let conn = mem();
         let me = db::this_device_uid(&conn).unwrap();
         let music = std::env::temp_dir().join(format!(
-            "sway-scope-{}-{:?}",
+            "trak-scope-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -1401,7 +1401,7 @@ mod tests {
     #[test]
     fn trash_hashes_survive_between_calls_but_not_a_changed_file() {
         let dir = std::env::temp_dir().join(format!(
-            "sway-trash-cache-{}-{:?}",
+            "trak-trash-cache-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

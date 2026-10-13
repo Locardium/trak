@@ -22,11 +22,11 @@ val keyProperties = Properties().apply {
 
 android {
     compileSdk = 36
-    namespace = "com.locardium.sway"
+    namespace = "com.locardium.trak.player"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         manifestPlaceholders["appLabel"] = "@string/app_name"
-        applicationId = "com.locardium.sway"
+        applicationId = "com.locardium.trak.player"
         minSdk = 26
         // 34, no 36: desde API 35 Android IMPONE edge-to-edge por sistema
         // (la app no puede optar afuera solo con codigo, ver MainActivity.kt).
@@ -55,7 +55,7 @@ android {
             // tauri.conf.json — the Tauri CLI rewrites `applicationIdSuffix`
             // here on every run, so it can't be set by hand. The label tells
             // the two apart on the phone.
-            manifestPlaceholders["appLabel"] = "Sway Dev"
+            manifestPlaceholders["appLabel"] = "Trak Dev"
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false

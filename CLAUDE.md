@@ -1,4 +1,4 @@
-# Sway — instrucciones para Claude
+# Trak — instrucciones para Claude
 
 ## Continuidad entre chats (OBLIGATORIO)
 
@@ -27,9 +27,9 @@ Escribir para un Claude que no vio esta conversación: concreto, con rutas, sin 
 - Android: todo `@Command` del plugin `crates/native-audio` corre en el UI thread; nada bloqueante ahí.
 - Android: `gen/android` no lo mira el watcher de `tauri android dev` — cambios en Kotlin/gradle
   requieren cortar y relanzar. Usar `pnpm dev:android` (ya trae `--no-watch`).
-- No usar AppData para datos de Sway.
-- Android: dev y release son apps separadas. `pnpm dev:android` instala `com.locardium.sway.dev`
-  ("Sway Dev", firmada con la clave debug); la release es `com.locardium.sway` (clave Locardium).
+- No usar AppData para datos de Trak.
+- Android: dev y release son apps separadas. `pnpm dev:android` instala `com.locardium.trak.player.dev`
+  ("Trak Dev", firmada con la clave debug); la release es `com.locardium.trak.player` (clave Locardium).
   El sufijo sale de `bundle.android.debugApplicationIdSuffix` en `tauri.conf.json`: el CLI de Tauri
   reescribe `applicationIdSuffix` en `build.gradle.kts` en cada corrida, no editarlo a mano. Nunca
   instalar un build debug sobre la release (firma distinta → habria que desinstalar → se borra la
@@ -52,4 +52,4 @@ Escribir para un Claude que no vio esta conversación: concreto, con rutas, sin 
 - `crates/core` — motor de sync sin Tauri (`engine.rs`, `wire.rs`, `transfer.rs`, `db.rs`).
 - `crates/native-audio` — fork del plugin Media3 (Kotlin en `android/src/main/java/...`).
 - `crates/server` — server headless (doc completa en `crates/server/README.md`).
-- Tests: `cargo test -p sway-core`, `cargo test -p sway-server`; front: `cd app && pnpm tsc --noEmit`.
+- Tests: `cargo test -p trak-core`, `cargo test -p trak-server`; front: `cd app && pnpm tsc --noEmit`.

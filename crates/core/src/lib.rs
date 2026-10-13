@@ -1,4 +1,4 @@
-//! Sway's engine: library, file identity and sync.
+//! Trak's engine: library, file identity and sync.
 //!
 //! This is where everything that doesn't need a screen lives. The Tauri app
 //! (`app/src-tauri`) and the file server (Phase 6.2) are two fronts on top

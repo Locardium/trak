@@ -85,7 +85,7 @@ export default function Settings({
   const android = isAndroid();
   const showExport = !android;
 
-  // Fase 1.3: whether Android is free to freeze/kill Sway in the background.
+  // Fase 1.3: whether Android is free to freeze/kill Trak in the background.
   // `null` = not checked yet (or desktop, where the whole row is hidden).
   // Re-checked on window focus: the exemption dialog is a separate system
   // Activity, and this is what's back on screen once the user answers it.
@@ -220,7 +220,7 @@ export default function Settings({
               <small>Imported files are copied here</small>
             </div>
             <div className="set-control">
-              <code className="set-path">&lt;Music&gt;/Sway</code>
+              <code className="set-path">&lt;Music&gt;/Trak</code>
               <button disabled>Change…</button>
             </div>
           </div>
@@ -369,7 +369,7 @@ export default function Settings({
                   {batteryExempt === false
                     ? 'Android can pause syncing or stop notification/Bluetooth controls in the background without this'
                     : batteryExempt === true
-                      ? 'Sway is exempt — background sync and playback controls should stay reliable'
+                      ? 'Trak is exempt — background sync and playback controls should stay reliable'
                       : 'Checking…'}
                 </small>
               </div>
@@ -414,7 +414,7 @@ export default function Settings({
             <span className="set-value">1.0.0</span>
           </div>
           {/* <p className="set-note">
-            Sway — a DJ library manager. Current output volume {Math.round(volume * 100)}%.
+            Trak — a DJ library manager. Current output volume {Math.round(volume * 100)}%.
           </p> */}
         </section>
       </div>

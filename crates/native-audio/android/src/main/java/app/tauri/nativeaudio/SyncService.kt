@@ -32,8 +32,8 @@ import androidx.core.content.ContextCompat
 /// repost the notification.
 class SyncService : Service() {
     companion object {
-        private const val TAG = "SwaySync"
-        private const val CHANNEL_ID = "sway_sync"
+        private const val TAG = "TrakSync"
+        private const val CHANNEL_ID = "trak_sync"
         private const val NOTIFICATION_ID = 0x5359
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_TEXT = "text"
@@ -146,7 +146,7 @@ class SyncService : Service() {
     private fun acquireLocks() {
         if (wakeLock == null) {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "sway:sync").apply {
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "trak:sync").apply {
                 setReferenceCounted(false)
                 // Upper bound in case nobody calls hide (a crash in Rust): a
                 // sync that takes longer renews it on the next start.
@@ -156,7 +156,7 @@ class SyncService : Service() {
         if (wifiLock == null) {
             val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             @Suppress("DEPRECATION")
-            wifiLock = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "sway:sync")?.apply {
+            wifiLock = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "trak:sync")?.apply {
                 setReferenceCounted(false)
                 acquire()
             }

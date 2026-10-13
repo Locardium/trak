@@ -1,16 +1,17 @@
 {
-  "name": "sway-workspace",
+  "name": "trak-workspace",
   "version": "1.0.0-1",
   "private": true,
-  "description": "Sway",
+  "license": "BUSL-1.1",
+  "description": "Trak",
   "scripts": {
     "dev": "cd app && pnpm tauri dev",
     "dev:android": "cd app && pnpm tauri android dev --no-watch",
     "build:win": "cd app && pnpm tauri build --bundles msi",
     "build:android": "cd app && pnpm tauri android build --apk",
-    "server:build-linux": "cargo zigbuild --release -p sway-server --target x86_64-unknown-linux-musl",
-    "server:build-win": "cargo build --release -p sway-server",
-    "server:dev": "cd target/server-dev && cargo run -p sway-server -- config.toml",
+    "server:build-linux": "cargo zigbuild --release -p trak-server --target x86_64-unknown-linux-musl",
+    "server:build-win": "cargo build --release -p trak-server",
+    "server:dev": "cd target/server-dev && cargo run -p trak-server -- config.toml",
     "build:all": "pnpm run build:win && pnpm run build:android && pnpm run server:build-linux && pnpm run server:build-win",
     "bump": "node scripts/bump-version.js",
     "release:win": "node scripts/release-win.js"

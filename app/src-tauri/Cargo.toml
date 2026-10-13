@@ -1,11 +1,12 @@
 [package]
-name = "sway"
+name = "trak"
 version = "1.0.0-1"
-description = "Sway — DJ player/organizer"
+description = "Trak — DJ player/organizer"
 edition = "2021"
+license = "BUSL-1.1"
 
 [lib]
-name = "sway_lib"
+name = "trak_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -17,7 +18,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # The engine: library, file identity, and sync. Without Tauri inside, so
 # the headless server (Phase 6.2) can use exactly the same code.
-sway-core = { path = "../../crates/core" }
+trak-core = { path = "../../crates/core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
@@ -25,7 +26,7 @@ tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
-# Only for cover art (cover.rs); import tags are read by sway-core.
+# Only for cover art (cover.rs); import tags are read by trak-core.
 lofty = "0.24"
 anyhow = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp"] }
@@ -46,7 +47,7 @@ ebur128 = "0.1"
 # with no visible error (see MainActivity.kt).
 #
 # blake3, uuid, snow, and walkdir moved out of here in Phase 6.0: they now
-# live in sway-core, which is what uses them.
+# live in trak-core, which is what uses them.
 mdns-sd = "0.20.3"
 
 # On Android eprintln! doesn't reach logcat; without this there's no way to

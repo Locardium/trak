@@ -53,13 +53,13 @@ pub fn emit_library_changed(handle: &AppHandle, force: bool) {
 /// How long to wait for a person to look at the screen and confirm.
 const DECISION_TIMEOUT: Duration = Duration::from_secs(120);
 
-// Whatever doesn't need a screen lives in `sway_core::pairing` since Phase
+// Whatever doesn't need a screen lives in `trak_core::pairing` since Phase
 // 6.1: keys, `devices` state, counts, and timeouts. What's left here is the
 // ceremony — showing the code and waiting for someone to look at it — and
 // the window events. The functions below are the same operation with the
 // `AppHandle` plugged in.
-use sway_core::pairing as core_pair;
-use sway_core::pairing::{platform, Known, CONNECT_TIMEOUT, IO_TIMEOUT};
+use trak_core::pairing as core_pair;
+use trak_core::pairing::{platform, Known, CONNECT_TIMEOUT, IO_TIMEOUT};
 
 /// Pending pairing decisions, keyed by peer uid. The connection thread waits
 /// on the receiver; the `confirm_pairing` command sends the answer.
@@ -274,7 +274,7 @@ fn store_device(handle: &AppHandle, uid: &str, name: &str, platform: &str, pubke
         // library right away, with the scope still at its default of
         // "everything": picking playlists afterwards meant waiting for all of
         // it to arrive and then deleting by hand (Fase 1.8). Now it starts as
-        // "selected" with nothing marked — which any version of Sway already
+        // "selected" with nothing marked — which any version of Trak already
         // reads as "no files" — so the first sync only brings playlists and
         // metadata, exactly what's needed to choose from, and the Sync screen
         // asks the question.
@@ -282,20 +282,20 @@ fn store_device(handle: &AppHandle, uid: &str, name: &str, platform: &str, pubke
         // Only the app does this: the server shares `core_pair::store_device`
         // and is an archive, it takes everything.
         let me = db::this_device_uid(&conn)?;
-        let before = sway_core::scope::get(&conn, &me)?.mode;
-        sway_core::scope::set_mode(&conn, &me, sway_core::scope::Mode::Selected)?;
+        let before = trak_core::scope::get(&conn, &me)?.mode;
+        trak_core::scope::set_mode(&conn, &me, trak_core::scope::Mode::Selected)?;
         // What's already here is this device's own: it stays marked. Left
         // unmarked it would count as a playlist this device merely knows
         // about — not handed on, and dropped once no linked device has it
         // (`scope::prune_orphans`). A device re-linking that was already
         // selective keeps exactly the marks it had.
-        if before == sway_core::scope::Mode::All {
+        if before == trak_core::scope::Mode::All {
             let own: Vec<String> = conn
                 .prepare("SELECT uid FROM playlists WHERE uid IS NOT NULL")?
                 .query_map([], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             for uid in &own {
-                sway_core::scope::set_playlist(&conn, &me, uid, true)?;
+                trak_core::scope::set_playlist(&conn, &me, uid, true)?;
             }
         }
         db::set_setting(&conn, SCOPE_PROMPT_KEY, "1")?;
@@ -790,7 +790,7 @@ pub fn pair_with_server(handle: &AppHandle, host: &str, port: u16, token: &str) 
     let private = private_key(handle)?;
     // No uid yet to mark: the version problem goes straight to the dialog.
     let mut sess = Session::connect(stream, &private).map_err(|e| {
-        match e.downcast_ref::<sway_core::wire::VersionMismatch>() {
+        match e.downcast_ref::<trak_core::wire::VersionMismatch>() {
             Some(v) => anyhow!(crate::discovery::update_note(
                 "The server",
                 core_pair::PLATFORM_SERVER,
@@ -910,7 +910,7 @@ pub fn restore_manual_peers(handle: &AppHandle) {
 /// somewhere.
 fn split_host_port(input: &str, default_port: u16) -> (String, u16) {
     let mut s = input.trim();
-    // Scheme: `https://`, `http://`, `sway://`, whatever.
+    // Scheme: `https://`, `http://`, `trak://`, whatever.
     if let Some((_, rest)) = s.split_once("://") {
         s = rest;
     }
@@ -1426,7 +1426,7 @@ fn key_mismatch(handle: &AppHandle, uid: &str, name: &str) {
 /// `PairingBroken`: retrying can't fix it until someone updates, and the
 /// watcher and autosync already know to stop on that.
 fn session_failed(handle: &AppHandle, uid: &str, e: anyhow::Error) -> anyhow::Error {
-    let Some(v) = e.downcast_ref::<sway_core::wire::VersionMismatch>() else { return e };
+    let Some(v) = e.downcast_ref::<trak_core::wire::VersionMismatch>() else { return e };
     let note = crate::discovery::update_note(
         &peer_name(handle, uid),
         &platform_of(handle, uid),
@@ -1476,7 +1476,7 @@ fn forget_device(handle: &AppHandle, uid: &str) -> Result<()> {
         let conn = state.db.lock().map_err(|_| anyhow!("db lock"))?;
         core_pair::forget_device(&conn, uid)?;
         // Playlists only that device had, and this one doesn't hold, go too.
-        sway_core::scope::prune_orphans(&conn)?
+        trak_core::scope::prune_orphans(&conn)?
     };
     if pruned > 0 {
         emit_library_changed(handle, true);
@@ -1552,16 +1552,16 @@ mod tests {
     fn pasting_the_server_url_works() {
         // It's what people have at hand and what anyone would paste.
         assert_eq!(
-            split_host_port("https://sway.example.com/", 7420),
-            ("sway.example.com".into(), 7420)
+            split_host_port("https://trak.example.com/", 7420),
+            ("trak.example.com".into(), 7420)
         );
         assert_eq!(
-            split_host_port("http://sway.example.com:9000/something?x=1", 7420),
-            ("sway.example.com".into(), 9000)
+            split_host_port("http://trak.example.com:9000/something?x=1", 7420),
+            ("trak.example.com".into(), 9000)
         );
         assert_eq!(
-            split_host_port("  sway.example.com  ", 7420),
-            ("sway.example.com".into(), 7420)
+            split_host_port("  trak.example.com  ", 7420),
+            ("trak.example.com".into(), 7420)
         );
     }
 

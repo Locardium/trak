@@ -25,7 +25,7 @@ members = ["app/src-tauri", "crates/core", "crates/native-audio", "crates/server
 # with opt-level 0. In release the same channel gives 476 MB/s: 136x.
 #
 # To measure it again:
-#   cargo test --release -p sway-core -- --ignored --nocapture channel_throughput
+#   cargo test --release -p trak-core -- --ignored --nocapture channel_throughput
 #
 # Only dependencies, not our own crates: those stay unoptimized, which
 # is what keeps the debugger useful and cuts recompilation time. blake3 and

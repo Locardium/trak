@@ -364,7 +364,7 @@ mod tests {
     /// the same "5 meta".
     #[test]
     fn reimporting_the_same_file_does_not_look_like_an_edit() {
-        let dir = std::env::temp_dir().join(format!("sway-reimp-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("trak-reimp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("track.mp3");
         std::fs::write(&f, b"some bytes").unwrap();
@@ -403,7 +403,7 @@ mod tests {
     /// it to the other device. A delete that undoes itself.
     #[test]
     fn internal_folders_are_never_imported() {
-        let root = std::env::temp_dir().join(format!("sway-imp-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("trak-imp-{}", std::process::id()));
         let trash = root.join("trash");
         let incoming = root.join("incoming");
         std::fs::create_dir_all(&trash).unwrap();

@@ -2,7 +2,7 @@
   color-scheme: dark;
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
 
-  /* Pure booth black + cool sky-blue accent (sway = water/movement). */
+  /* Pure booth black + cool sky-blue accent (trak = water/movement). */
   --bg: oklch(11% 0 0);
   --panel: oklch(14% 0 0);
   --panel-2: oklch(18% 0 0);

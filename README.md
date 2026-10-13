@@ -1,12 +1,12 @@
-# Sway 🎧
+# Trak 🎧
 
 > **A music library manager and player built by a DJ, for DJs, with love ❤️**
 
-Sway is currently in **Beta**. Since this is a passion project, expect some bugs! I welcome all suggestions, bug reports, and code contributions to make it better.
+Trak is currently in **Beta**. Since this is a passion project, expect some bugs! I welcome all suggestions, bug reports, and code contributions to make it better.
 
 ---
 
-## The Story Behind Sway (Why I built it)
+## The Story Behind Trak (Why I built it)
 
 As a DJ, organizing a local music collection (FLACs, MP3s, WAVs) can be a real headache. For years, I relied on **iTunes** to curate my library. It had a simple, powerful way to order tracks manually, and by exporting an iTunes XML file, I could easily import my structured playlists and folders directly into legacy DJ software like **Rekordbox** and **Serato**.
 
@@ -15,15 +15,15 @@ However, iTunes eventually presented three critical dealbreakers:
 2. **Unsupported formats**: It lacked native support for high-quality formats like **FLAC**, forcing annoying file conversions.
 3. **Impossibly complex sync**: Trying to keep my music library synchronized across my two PCs and my Android phone was incredibly frustrating, slow, or outright impossible.
 
-I built **Sway** to solve these exact problems. It is a modern, lightweight desktop and mobile application designed to replace the iTunes/Explorer flow, allowing DJs to easily manage, pre-listen, sync, and project their playlist hierarchies onto legacy DJ platforms.
+I built **Trak** to solve these exact problems. It is a modern, lightweight desktop and mobile application designed to replace the iTunes/Explorer flow, allowing DJs to easily manage, pre-listen, sync, and project their playlist hierarchies onto legacy DJ platforms.
 
 ---
 
 ## Key Features
 
-* **Legacy Export First**: Sway natively creates standard iTunes-compatible XML files, ensuring your manual playlist orders and folder hierarchies carry over perfectly to Rekordbox and Serato.
+* **Legacy Export First**: Trak natively creates standard iTunes-compatible XML files, ensuring your manual playlist orders and folder hierarchies carry over perfectly to Rekordbox and Serato.
 * **All Formats Welcome**: Native support for **FLAC**, MP3, WAV, and more. No conversions needed.
-* **Safe-by-Design File Integrity**: Your files are sacred. Sway uses a built-in virtual recycle bin to store out-of-scope files for 30 days before removal. You'll never accidentally lose a track from your hard drive again.
+* **Safe-by-Design File Integrity**: Your files are sacred. Trak uses a built-in virtual recycle bin to store out-of-scope files for 30 days before removal. You'll never accidentally lose a track from your hard drive again.
 * **Real-time P2P Synchronization**: Easily sync your tracks and database between multiple PCs and your phone over your local network using fast peer-to-peer (P2P) transfers.
 * **Your Own Backup & Remote Server**: Run a headless backup server where all your tracks from all devices are safely uploaded. You can also fetch tracks from this server remotely in real time using secure P2P connections.
 * **Advanced Player & Volume Normalization**: Pre-listen to your sets with seamless crossfades, gapless playback, and smart volume normalization targeting **-6.0 LUFS** (no more sudden volume jumps between tracks!).
@@ -42,11 +42,11 @@ Here is what is planned for future releases:
 
 ## Technical Overview (For Developers)
 
-Sway is built as a Rust and pnpm monorepo using **Tauri v2** and **React 18**.
+Trak is built as a Rust and pnpm monorepo using **Tauri v2** and **React 18**.
 
 ### Project Structure
 ```
-sway/
+trak/
 ├── app/                  # Tauri frontend application (Vite + React + TS)
 │   ├── src/              # React UI (TrackTable, PlayerBar, Sync, etc.)
 │   └── src-tauri/        # Tauri application backend (desktop playback, watchers, platform APIs)
@@ -119,4 +119,12 @@ pnpm install
 
 ## License
 
-This project is proprietary. All rights reserved.
+Licensed under the [Business Source License 1.1](LICENSE).
+
+- **Free:** personal use, testing and evaluation, and self-hosting (running Trak and its server
+  on your own machines, for yourself or your own organization).
+- **Not allowed:** any commercial use — distributing it commercially, selling it or its
+  binaries, or offering it (or a service built on it) to third parties as a paid product.
+- Each version becomes available under the Apache License 2.0 four years after its release.
+
+`crates/native-audio` is a vendored fork and keeps its original MIT OR Apache-2.0 licenses.

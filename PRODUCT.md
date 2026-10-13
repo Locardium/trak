@@ -10,11 +10,11 @@ DJs (starting with the author himself) who organize their local music library: i
 
 ## Product Purpose
 
-Sway is a cross-platform DJ player/organizer (Tauri). It replaces the iTunes/Explorer flow for curating the library: importing, tagging, manually ordering hierarchical playlists, and projecting that hierarchy to legacy formats. Success = organizing a 50-track set faster and more comfortably than in Rekordbox itself, without losing metadata.
+Trak is a cross-platform DJ player/organizer (Tauri). It replaces the iTunes/Explorer flow for curating the library: importing, tagging, manually ordering hierarchical playlists, and projecting that hierarchy to legacy formats. Success = organizing a 50-track set faster and more comfortably than in Rekordbox itself, without losing metadata.
 
 ## Brand Personality
 
-Deep, precise, fluid. Dark booth interface — true deep black (not dark gray), a single cold blue/light-blue accent evoking "sway" (movement, water). High information density with clear hierarchy; the track and its metadata are the protagonists.
+Deep, precise, fluid. Dark booth interface — true deep black (not dark gray), a single cold blue/light-blue accent. High information density with clear hierarchy; the track and its metadata are the protagonists.
 
 ## Anti-references
 

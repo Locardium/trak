@@ -14,11 +14,11 @@ use tauri::AppHandle;
 #[cfg(target_os = "windows")]
 use tauri::Manager;
 
-/// Key that `export_xml::generate_xml` puts into every file Sway writes.
+/// Key that `export_xml::generate_xml` puts into every file Trak writes.
 /// Used to distinguish "we wrote this" (no backup needed) from "this is
 /// foreign" (the user's original library, or the file rewritten by real
 /// iTunes/Music since the last time we wrote it).
-const MARKER: &str = "<key>Sway Generator</key>";
+const MARKER: &str = "<key>Trak Generator</key>";
 
 /// Standard location of the iTunes library on Windows
 /// (`<Music>\iTunes\iTunes Music Library.xml`). Windows only for now:
@@ -101,7 +101,7 @@ mod tests {
     use super::*;
 
     fn tmp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("sway-xmlsync-test-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("trak-xmlsync-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -119,7 +119,7 @@ mod tests {
     fn no_backup_when_marker_present() {
         let dir = tmp_dir("ours");
         let target = dir.join("iTunes Music Library.xml");
-        std::fs::write(&target, "<plist><key>Sway Generator</key><true/></plist>").unwrap();
+        std::fs::write(&target, "<plist><key>Trak Generator</key><true/></plist>").unwrap();
         backup_if_foreign(&target).unwrap();
         assert!(target.exists(), "our own file must not be moved");
         assert!(!dir.join("iTunes Music Library.original.xml").exists());
@@ -145,11 +145,11 @@ mod tests {
         std::fs::write(&target, "foreign v1").unwrap();
         backup_if_foreign(&target).unwrap();
         assert!(dir.join("iTunes Music Library.original.xml").exists());
-        // Sway writes its own version (with marker), then real iTunes
+        // Trak writes its own version (with marker), then real iTunes
         // overwrites it again with another foreign version -> the .original
         // already exists, the first one must not be lost: the second gets a
         // timestamp.
-        std::fs::write(&target, "<key>Sway Generator</key>").unwrap();
+        std::fs::write(&target, "<key>Trak Generator</key>").unwrap();
         std::fs::write(&target, "foreign v2 (real iTunes rewrote it)").unwrap();
         backup_if_foreign(&target).unwrap();
         let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();

@@ -70,7 +70,7 @@ type ModalState =
   | { type: 'sync' }
   | null;
 
-const VOL_STORAGE = 'sway.volume';
+const VOL_STORAGE = 'trak.volume';
 /// ui_setting key for the play queue (JSON array of track ids). Android only.
 const QUEUE_KEY = 'queue';
 /// Before this point in the track, "back" jumps to the previous one instead
@@ -133,7 +133,7 @@ export default function App() {
     false,
     (r) => r === '1',
     (v) => (v ? '1' : '0'),
-    { legacyKey: 'sway.shuffle' },
+    { legacyKey: 'trak.shuffle' },
   );
   const [repeat, setRepeat] = useUiSetting<RepeatMode>(
     'repeat',
@@ -146,7 +146,7 @@ export default function App() {
       return 'off';
     },
     (v) => v,
-    { legacyKey: 'sway.repeat' },
+    { legacyKey: 'trak.repeat' },
   );
   // On the phone the player is left wide open and the hardware buttons are the
   // volume — there is no slider to restore, and a stored value from a desktop
@@ -345,16 +345,16 @@ export default function App() {
   // to the plugin's notification broadcasts — see the long comment there.
   useEffect(() => {
     const w = window as typeof window & {
-      __swayMediaButton?: (button: string) => void;
-      __swayAppVisible?: (visible: boolean) => void;
+      __trakMediaButton?: (button: string) => void;
+      __trakAppVisible?: (visible: boolean) => void;
     };
     // MainActivity listens over two different paths (MediaSession and the
     // notification broadcast) because which one is active depends on the
     // Android version and the manufacturer's layer. If the same tap arrives
     // through both, this keeps the first one.
-    w.__swayAppVisible = (visible) => setAppVisible(visible);
+    w.__trakAppVisible = (visible) => setAppVisible(visible);
     let lastAt = 0;
-    w.__swayMediaButton = (button) => {
+    w.__trakMediaButton = (button) => {
       const now = Date.now();
       if (now - lastAt < 400) return;
       lastAt = now;
@@ -362,8 +362,8 @@ export default function App() {
       else if (button === 'prev') onPrev();
     };
     return () => {
-      delete w.__swayMediaButton;
-      delete w.__swayAppVisible;
+      delete w.__trakMediaButton;
+      delete w.__trakAppVisible;
     };
   }, []);
 
@@ -1324,7 +1324,7 @@ export default function App() {
           >
             <Menu size={18} />
           </button>
-          <h1>Sway</h1>
+          <h1>Trak</h1>
         </div>
         <div className="search">
           <input
@@ -1474,7 +1474,7 @@ export default function App() {
       {modal?.type === 'confirm-tracks' && (
         <Confirm
           title="Delete from library"
-          message={`${modal.ids.length} track(s) are removed from the library and all playlists. Files managed by Sway go to the OS trash; others are left on disk.`}
+          message={`${modal.ids.length} track(s) are removed from the library and all playlists. Files managed by Trak go to the OS trash; others are left on disk.`}
           confirmLabel="Delete"
           onConfirm={() => doDeleteTracks(modal.ids)}
           onClose={() => setModal(null)}

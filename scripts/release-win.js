@@ -104,14 +104,14 @@ try {
   const msiPath = path.join(msiDir, msiFile);
   console.log(`\nFound bundle: ${msiPath}`);
 
-  const serverWinPath = path.join(root, "target/release/sway-server.exe");
+  const serverWinPath = path.join(root, "target/release/trak-server.exe");
   if (!fs.existsSync(serverWinPath)) {
     throw new Error(`No server binary found at ${serverWinPath}`);
   }
 
   const serverLinuxPath = path.join(
     root,
-    "target/x86_64-unknown-linux-musl/release/sway-server"
+    "target/x86_64-unknown-linux-musl/release/trak-server"
   );
   if (!fs.existsSync(serverLinuxPath)) {
     throw new Error(`No server binary found at ${serverLinuxPath}`);
@@ -122,9 +122,9 @@ try {
   run(
     `gh release create ${tag} ` +
       `"${msiPath}" ` +
-      `"${serverWinPath}#sway-server-windows.exe" ` +
-      `"${serverLinuxPath}#sway-server-linux" ` +
-      `--title "Sway ${tag}" ${prereleaseFlag} --notes "Sway ${tag}"`
+      `"${serverWinPath}#trak-server-windows.exe" ` +
+      `"${serverLinuxPath}#trak-server-linux" ` +
+      `--title "Trak ${tag}" ${prereleaseFlag} --notes "Trak ${tag}"`
   );
 
   console.log(`\nDone. Release ${tag} published.`);
