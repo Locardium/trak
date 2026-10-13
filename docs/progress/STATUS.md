@@ -12,8 +12,8 @@ aislado" y Fase 2). Fase 4 cerrada y commiteada 2026-09-29.
 `beta1-fase4`, `backup-pre-rewrite` y el stash viejo se borraron 2026-09-29 (ver LOG). El push
 lo hace el usuario.
 **Próximo paso (en este orden, actualizado 2026-10-13):**
--1. Fase 5 en curso. Commit `e996dbf` = 5.3 rename + 5.5 licencia. Sin commit: 5.4, 5.1, 5.2,
-   5.6 (ver abajo). Falta que el usuario: (a) pruebe el instalador
+-1. Fase 5 en curso. Commits `e996dbf` (5.3 rename + 5.5 licencia) y `43d037a` (5.4, 5.1,
+   5.2, 5.6, versión 1.0.0-beta.2). Sin push. Falta que el usuario: (a) pruebe el instalador
    `target/release/bundle/nsis/Trak_1.0.0-1_x64-setup.exe` (instalar en Program Files, abrir,
    importar, actualizar instalando de nuevo, desinstalar → la biblioteca tiene que quedar);
    (b) `pnpm dev:android`; (c) renombre el repo de GitHub a `Locardium/trak` ANTES del primer
