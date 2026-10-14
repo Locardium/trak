@@ -1,5 +1,6 @@
-# Trak server in a container (Phase 5.6). Built from the repo root, since the
-# server shares the workspace with trak-core:
+# Trak server in a container (Phase 5.6). Built on the server itself by
+# docker-compose.yml, straight from the GitHub repo; or from the repo root,
+# since the server shares the workspace with trak-core:
 #
 #   docker build -f crates/server/Dockerfile -t trak-server .
 #

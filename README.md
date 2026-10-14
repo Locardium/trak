@@ -43,37 +43,26 @@ Downloads are on the [latest release](https://github.com/Locardium/trak/releases
 
 On Windows, Trak keeps **everything next to the program**: the database, the `library` folder
 with your music, covers and its trash. Back up or move that folder and you've moved your whole
-library. Uninstalling removes the program and leaves that data where it is.
+library. Uninstalling removes the program and leaves that data where it is, unless you tick
+"Delete the application data".
 
 ## Running the Server
 
 The server is optional: a box that keeps a copy of everything your devices send it, and lets
-them sync away from home. On Linux, no Rust needed:
+them sync when they aren't on the same network. It runs on Linux, two ways:
 
-```bash
-sudo useradd --system --home /var/lib/trak --create-home trak
-sudo curl -L -o /usr/local/bin/trak-server https://github.com/Locardium/trak/releases/latest/download/trak-server-linux
-sudo chmod +x /usr/local/bin/trak-server
-cd /var/lib/trak && sudo -u trak /usr/local/bin/trak-server
-```
+* **Docker**: download one compose file, set a token, `docker compose up -d --build`. Docker
+  builds it from this repo at the latest release.
+* **systemd**: one static binary from the release, no Docker or Rust needed.
 
-The first run writes `config.toml` (with the `pair_token` you'll type in the app) and exits.
-Review it, then run it under systemd. Or with Docker:
-
-```bash
-cd crates/server
-echo "TRAK_SERVER_TOKEN=$(openssl rand -hex 24)" > .env
-docker compose up -d
-```
-
-Full guide (config, systemd unit, Docker, security): [`crates/server/README.md`](crates/server/README.md).
+Install, update and remove, step by step for both: [`crates/server/README.md`](crates/server/README.md#install).
 
 ---
 
 ## Future Roadmap 🚀
 
 Here is what is planned for future releases:
-- **UI/UX Polish** (Coming soon): Improving layout density, shortcuts, and overall looks.
+- **UI/UX Redesign** (Coming soon): Improving layout density, shortcuts, and overall looks.
 - **Native BPM Scanning**: Analyze tempo directly inside the app.
 - **Comprehensive Docs**: Written guides on workflow setups.
 - **macOS & iOS Support**: Planned for future phases once the project gains traction (currently limited by testing hardware!).

@@ -10,6 +10,10 @@
 //   trak-server-windows.exe   server
 //   trak-server-linux         server, static (musl)
 //
+// The server's Docker image isn't built here: crates/server/docker-compose.yml
+// builds it on the server from the `stable` branch, which this script moves to
+// the new tag once the release is published.
+//
 // If anything fails after the tag is pushed (build, missing artifact, gh
 // release), the tag is deleted locally and on origin so a retry starts
 // clean. The version-bump commit is never rolled back — it's harmless on
@@ -152,6 +156,18 @@ try {
       files.map((f) => `"${f}"`).join(" ") +
       ` --title "Trak ${tag}" ${prereleaseFlag} --notes "Trak ${tag}"`
   );
+
+  // 8. Point `stable` at this release: it's what the server's
+  // docker-compose.yml builds by default. Only now, so a failed release never
+  // reaches the servers.
+  // The release is already public: a failure here must not roll the tag back.
+  try {
+    const sha = execSync(`git rev-list -n 1 ${tag}`, { cwd: root }).toString().trim();
+    run(`git push --force origin ${sha}:refs/heads/stable`);
+  } catch (e) {
+    console.error(`\nCould not move stable to ${tag}: ${e.message}`);
+    console.error(`Do it by hand: git push --force origin ${tag}^{commit}:refs/heads/stable`);
+  }
 
   console.log(`\nDone. Release ${tag} published from ${path.relative(root, dist)}.`);
 } catch (e) {

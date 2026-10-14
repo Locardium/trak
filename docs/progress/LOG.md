@@ -5,6 +5,41 @@
 
 ---
 
+## 2026-10-13 · README del server reorganizado (instalar/actualizar/quitar)
+
+- `crates/server/README.md`: nueva sección "Install" con "With Docker" y "With systemd (no
+  Docker)", cada una con Install / Logs / Update / Remove (y cómo borrar también los datos).
+  Se fusionaron "Quick start on Linux", "Docker" y "systemd"; "Running" → "Configuration";
+  "Building" → "Building from source" al final (con el `docker build` desde el repo). En
+  systemd el update para el servicio antes del `curl` (binario en uso no se pisa).
+- `README.md` raíz: "Running the Server" resumido, link a `crates/server/README.md#install`.
+
+## 2026-10-13 · 5.6 compose usa el último release (rama `stable`) + README roadmap
+
+- Pedido: no tener que poner `TRAK_VERSION`. Git no tiene "último release", así que
+  `scripts/release-win.js` paso 8 mueve la rama `stable` al commit del tag recién publicado
+  (no fatal: si falla, imprime el comando a mano). `docker-compose.yml`: contexto
+  `#${TRAK_VERSION:-stable}`, imagen `trak-server:${TRAK_VERSION:-stable}`. La rama no existe
+  hasta el primer release con este script.
+- Hallado al escribir los pasos: el bind mount `./trak-data` que crea Docker queda de root y el
+  contenedor corre como uid 10001 → no puede escribir. Documentado `mkdir trak-data && sudo
+  chown 10001:10001 trak-data` (compose, ambos READMEs).
+- README raíz: roadmap "UI/UX Polish" → "UI/UX Redesign".
+
+## 2026-10-13 · 5.6 Docker: el server compila la imagen desde GitHub + repo renombrado
+
+- El usuario renombró el repo a `https://github.com/Locardium/trak`; `git remote set-url origin`
+  hecho. El remoto `master` estaba en `63272b3` (todo lo de Fase 2 en adelante sin push).
+- Se probó la idea de publicar en GHCR con un workflow de GitHub Actions; el usuario la
+  descartó (no quiere Actions ni registry; tiene Docker en el server). Borrado.
+- `crates/server/docker-compose.yml`: `build.context` =
+  `https://github.com/Locardium/trak.git#${TRAK_VERSION}` + `dockerfile:
+  crates/server/Dockerfile`, `image: trak-server:${TRAK_VERSION}`. En el server alcanza con
+  el compose y un `.env` (`TRAK_VERSION`, `TRAK_SERVER_TOKEN`). READMEs actualizados.
+  Requiere BuildKit (default en Compose v2) por el `RUN --mount=type=cache` del Dockerfile.
+- Arreglado: en `crates/server/README.md` el `\` de continuación del `curl` de Linux se había
+  perdido. Sin probar Docker (no hay en esta PC).
+
 ## 2026-10-13 · 5.7 borrar manda a la papelera de Trak + retención real de 30 días
 
 - Antes: borrar desde la app → Papelera de Windows (`trash::delete`, crate `trash`), en
