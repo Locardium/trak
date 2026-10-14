@@ -264,7 +264,7 @@ Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que deber�
   tras publicar, sin rollback si falla) → por defecto el server usa el último release;
   `TRAK_VERSION=vX` en `.env` lo fija. Actualizar = `docker compose up -d --build`. `.env`
   sólo necesita `TRAK_SERVER_TOKEN`. `trak-data` hay que crearlo con `chown 10001:10001`
-  (si lo crea Docker es de root y el server no puede escribir). Sin probar.
+  (si lo crea Docker es de root y el server no puede escribir). Commit `7f0224d`. Sin probar.
 - 🧪 5.5 (pedido y hecho 2026-10-13, sin commit) Licencia BSL 1.1: `LICENSE` en la raíz (texto
   oficial de SPDX `BUSL-1.1`, Terms idénticos), Licensor Locardium, Additional Use Grant = uso
   personal, pruebas y self-hosting gratis; prohibido uso comercial. Change Date 4 años por
