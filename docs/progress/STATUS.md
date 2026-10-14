@@ -243,7 +243,7 @@ Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que deber�
   Trak). Ver PLAN 5.4.
   Además, en 5.6: con `TRAK_SERVER_TOKEN` seteado y sin config, el server arranca con
   defaults en vez de escribir el config y salir (pedido del usuario).
-- 🧪 5.7 (pedido 2026-10-13, sin commit) Todo borrado va a la papelera de Trak (`trash\`, 30
+- 🧪 5.7 (pedido 2026-10-13, commit `e6c91c3`) Todo borrado va a la papelera de Trak (`trash\`, 30
   días): `db::delete_tracks` usa `trash::move_to_trash` en vez del crate `trash` (Papelera de
   Windows; en Android era `remove_file` definitivo; en USB Windows no tiene Papelera →
   definitivo). Crate `trash` sacado de `crates/core/Cargo.toml`. Bug de paso:
