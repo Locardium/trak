@@ -36,7 +36,8 @@
     "windows": {
       "nsis": {
         "installMode": "perMachine",
-        "installerHooks": "./windows/hooks.nsh"
+        "installerHooks": "./windows/hooks.nsh",
+        "installerIcon": "icons/icon.ico"
       }
     },
     "android": {

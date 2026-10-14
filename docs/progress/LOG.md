@@ -5,6 +5,32 @@
 
 ---
 
+## 2026-10-14 · Ícono de la app: logo de Trak
+
+- El usuario dejó `app/src-tauri/icons/trak-logo.png` (2000×2000, cuadrado oscuro redondeado
+  con la "t", esquinas transparentes). `pnpm tauri icon src-tauri/icons/trak-logo.png` (desde
+  `app/`) regeneró todos los íconos (`icons/*`, `.ico`, `.icns`, iOS) y los `mipmap-*` de
+  `gen/android`, más `mipmap-anydpi-v26/` + `values/ic_launcher_background.xml` (nuevos: antes
+  Android no tenía ícono adaptativo).
+- Problema: en Android Tauri pone el logo de borde a borde en el foreground con fondo `#fff`
+  (`tauri icon` no tiene opción de fondo ni margen; sólo `--ios-color`). Con la máscara del
+  launcher (72 de 108dp) la "t" quedaba enorme y se veían esquinas blancas.
+- Fix: `scripts/android-icon.py` (Pillow + numpy). Toma el centro opaco del logo
+  (`OPAQUE` 200..1800), lo escala para que la esquina más lejana de la "t" (`GLYPH_BOX` medido:
+  595,351–1382,1651) quede al 75 % del radio visible, y extiende el fondo repitiendo los bordes
+  (`np.pad mode=edge`) para que el degradé siga sin costura. Fondo `#1d1d1d`. Verificado con
+  previews de máscara círculo / squircle / cuadrado. **Después de cada `pnpm tauri icon` hay que
+  correr `python scripts/android-icon.py`**; con otro logo, medir de nuevo `OPAQUE` y
+  `GLYPH_BOX`. Sin probar en el celu.
+- Usuario: el exe instalado seguía con el ícono viejo (sólo la ventana tenía el nuevo). Causa:
+  el ícono del exe se compila en `resource.lib` desde el `build.rs`, y `tauri-build` sólo
+  pide rerun por `tauri.conf.json`/capabilities, no por `icons/`. Fix:
+  `app/src-tauri/build.rs` → `cargo:rerun-if-changed=icons`. Además el instalador NSIS tenía
+  el ícono genérico de NSIS: `bundle.windows.nsis.installerIcon = "icons/icon.ico"`.
+  Verificado extrayendo el ícono (`System.Drawing.Icon.ExtractAssociatedIcon`) de
+  `target/release/trak.exe` y de `Trak_1.0.0-beta.2_x64-setup.exe`: los dos con el logo. Si
+  Windows sigue mostrando el viejo en un acceso directo es su caché de íconos.
+
 ## 2026-10-13 · README del server reorganizado (instalar/actualizar/quitar)
 
 - `crates/server/README.md`: nueva sección "Install" con "With Docker" y "With systemd (no

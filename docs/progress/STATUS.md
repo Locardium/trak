@@ -4,40 +4,42 @@
 > Detalle de cada ítem (causa raíz, archivos, fix): `PLAN-BETA1.md`. Historia: `LOG.md`.
 > Lista original del usuario: `notes.txt` (raíz, gitignoreado).
 
-**Última actualización:** 2026-10-13 (Fase 2 completa y commiteada; 2.6-2.8 sin probar en device)
-**Fase actual:** Fase 2 — 2.1-2.5 confirmadas por el usuario; 2.6, 2.7 y 2.8 hechas con tests,
-falta probarlas en device. Todo commiteado en `master` 2026-10-13 (dos commits: "dev de Windows
-aislado" y Fase 2). Fase 4 cerrada y commiteada 2026-09-29.
-**Git:** sólo existe `master` (fases 1-4 adentro). Las ramas `beta1-fase1-3`,
-`beta1-fase4`, `backup-pre-rewrite` y el stash viejo se borraron 2026-09-29 (ver LOG). El push
-lo hace el usuario.
-**Próximo paso (en este orden, actualizado 2026-10-13):**
--1. Fase 5 en curso. Commits `e996dbf` (5.3 rename + 5.5 licencia) y `43d037a` (5.4, 5.1,
-   5.2, 5.6, versión 1.0.0-beta.2). Sin push. Falta que el usuario: (a) pruebe el instalador
-   `target/release/bundle/nsis/Trak_1.0.0-1_x64-setup.exe` (instalar en Program Files, abrir,
-   importar, actualizar instalando de nuevo, desinstalar → la biblioteca tiene que quedar);
-   (b) `pnpm dev:android`; (c) renombre el repo de GitHub a `Locardium/trak` ANTES del primer
-   release (los READMEs ya apuntan a `github.com/Locardium/trak/releases/latest/download/...`);
-   (d) pruebe Docker (no hay Docker en esta PC).
-0. Fase 2 completa, confirmada en device y commiteada (2.1-2.12, 2026-10-13; último commit
-   `d76327f`). Sin push. Sigue la Fase 5. Antes de cada commit:
-   `gen/android/app/build.gradle.kts` sale `w/mixed` por el CLI de Tauri → `git checkout`.
-1. Al probar: PC + celu + server con protocolo 2 (2.8 ya chequea: un build viejo sale como
-   "Update needed"; la release instalada 1.0.0-1 no tiene chequeo y se actualiza a mano). Datos dev: PC dev en `<Music>\Trak Dev` (hasta 5.4), server dev con
-   `pnpm server:dev` (corre en `target/server-dev/`: `config.toml`, `data/`, `music/` ahí).
-2. **Fase 5** (5.1 artefactos del release en `dist/<tag>/` + APK; 5.2 README del server en Linux).
-3. Fase 1 confirmada por el usuario 2026-10-13 (1.2-1.7). 1.7 parte B (reanudación Media3 con
-   proceso muerto) sigue en reserva.
-4. Fase 6 (rediseño de UI) se planea aparte después.
+**Última actualización:** 2026-10-14 (Fase 5 hecha en código y commiteada; falta probar y publicar)
+**Fase actual:** Fase 5 — release y docs. La app ahora se llama **Trak** (antes Sway, ver 5.3).
+Fases 1-4 y 2 cerradas y confirmadas por el usuario.
+**Git:** sólo `master`. Repo renombrado a `https://github.com/Locardium/trak` (`origin` ya
+apunta ahí). Todo commiteado; el push lo hace el usuario (al cierre del 2026-10-14 iba a
+pushear). La rama `stable` no existe hasta el primer `pnpm release:win`.
+**Próximo paso (en este orden, actualizado 2026-10-14):**
+1. Probar (usuario):
+   - Android: `pnpm dev:android` (app nueva `com.locardium.trak.player.dev`; desinstalar la dev
+     vieja para ver el ícono nuevo; hay que emparejar de nuevo).
+   - Mover una carpeta de datos con música (portable o instalada) → los temas siguen sonando
+     (`db::relocate_tracks`, 5.4).
+   - Borrar un tema → aparece en `<carpeta de Trak>	rash\` (5.7).
+   - Instalador ya probado por el usuario 2026-10-14 (instala en `E:\Programs\Trak`,
+     desinstalar con/sin "Delete the application data" OK). El ícono "S" viejo que veía era la
+     caché de íconos de Windows (`ie4uinit.exe -show`); el exe tiene el logo.
+2. `pnpm release:win 1.0.0-beta.2` (bumpea, commitea, tag, build win+android+servers,
+   `dist/v1.0.0-beta.2/`, `gh release create`, mueve `stable`). Necesita `JAVA_HOME` para el APK.
+3. Server con Docker siguiendo `crates/server/README.md#install` (compila desde `stable`).
+   Emparejar de nuevo todos los devices (cambió el contexto del hash del token, 5.3).
+4. Mudanza manual del usuario: copiar `Music\Sway` → carpeta de Trak (`db.sqlite*`,
+   `library\`, …); `relocate_tracks` arregla las rutas. Desinstalar Sway (PC y celu).
+5. Pregunta abierta: ¿logo también dentro de la app (sidebar, pantalla vacía)? Si no, Fase 6.
+6. Fase 6 (rediseño de UI) se planea aparte. 1.7 parte B (reanudación Media3) sigue en reserva.
+
+Antes de cada commit: `gen/android/app/build.gradle.kts` sale `w/mixed` por el CLI de Tauri →
+`git checkout` de ese archivo.
 
 **Todo lo de las fases 1-4 está commiteado en `master`** (ver LOG).
 Ojo con los finales de línea: varios archivos del repo son CRLF en el índice (`git ls-files
 --eol`); si un editor/script los deja en LF, el diff sale entero. Antes de commitear:
 `git ls-files --eol | awk '$1=="i/crlf" && $2!="w/crlf"'` debe salir vacío.
 
-**Protocolo de sync versionado desde 2.8** (`wire::PROTOCOL` = 2, `MIN_PROTOCOL` = 2): lo de la
-Fase 2 es protocolo 2. Builds viejos (1.0.0-1, sin versión) salen "Update needed". Regla de bump
-en `CLAUDE.md`.
+**Protocolo de sync versionado desde 2.8**: hoy `wire::PROTOCOL` = 3, `MIN_PROTOCOL` = 3 (el
+rename a Trak, 5.3, cambió mDNS y el hash del token). Builds de Sway salen "Update needed".
+Regla de bump en `CLAUDE.md`.
 
 **Builds en el S24:** release `com.locardium.sway` instalada 2026-09-25 14:24:46 (tiene 1.7A + 1.8
 + filtro de logs + 3.2 título/artista). Dev `com.locardium.sway.dev` = lo que haya corrido el
@@ -271,6 +273,11 @@ Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que deber�
   versión → Apache 2.0. README "License" + `license = "BUSL-1.1"` en Cargo/package.json.
   `crates/native-audio` sigue MIT/Apache. Falta: que el usuario revise el texto; GitHub detecta
   la licencia al hacer push.
+
+- ✅ Ícono (2026-10-14): logo `app/src-tauri/icons/trak-logo.png` → `pnpm tauri
+  icon` + `python scripts/android-icon.py` (Android adaptativo con margen y fondo oscuro; ver
+  LOG). Exe e instalador verificados con el logo (`build.rs` rerun por `icons/` +
+  `installerIcon`). Falta verlo en el celu.
 
 ## Fase 6 — Rediseño de UI
 - ⬜ Se planea aparte cuando terminen las fases 1-5.
