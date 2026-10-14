@@ -737,6 +737,33 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Points every managed track at `music_dir` again, from its `rel_path`.
+///
+/// The absolute `path` is derived data: `rel_path` is what names the file
+/// inside the library. When the whole data folder moves (a portable copy on
+/// a USB stick that gets another drive letter, a library copied into a new
+/// install, a server whose `music_dir` now points at another disk), the
+/// stored paths still name the old place and every track would look missing.
+/// Run at startup, before anything reads a path. Returns how many moved.
+pub fn relocate_tracks(conn: &Connection, music_dir: &Path) -> Result<usize> {
+    let rows: Vec<(i64, String, String)> = {
+        let mut stmt = conn.prepare("SELECT id, path, rel_path FROM tracks WHERE rel_path IS NOT NULL")?;
+        let r = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        r.collect::<rusqlite::Result<_>>()?
+    };
+    let tx = conn.unchecked_transaction()?;
+    let mut moved = 0;
+    for (id, path, rel) in rows {
+        let want = music_dir.join(&rel).to_string_lossy().into_owned();
+        if path != want {
+            tx.execute("UPDATE tracks SET path = ?1 WHERE id = ?2", rusqlite::params![want, id])?;
+            moved += 1;
+        }
+    }
+    tx.commit()?;
+    Ok(moved)
+}
+
 /// Identity of THIS device, stable for life (generated once
 /// and kept in `app_settings`). It's what signs tombstones and clocks, and what
 /// breaks ties between equal LWW timestamps — that's why it can't be regenerated on every startup.
@@ -1364,6 +1391,29 @@ fn touch_playlist(tx: &rusqlite::Transaction, playlist_id: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relocate_points_tracks_at_the_new_folder() {
+        let conn = mem();
+        let old = Path::new("E:/Trak/library");
+        let new = Path::new("F:/Trak/library");
+        conn.execute(
+            "INSERT INTO tracks (path, rel_path) VALUES (?1, 'a.flac'), (?2, NULL)",
+            rusqlite::params![old.join("a.flac").to_string_lossy(), "C:/elsewhere/b.mp3"],
+        )
+        .unwrap();
+        assert_eq!(relocate_tracks(&conn, new).unwrap(), 1);
+        let paths: Vec<String> = conn
+            .prepare("SELECT path FROM tracks ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(paths, vec![new.join("a.flac").to_string_lossy().into_owned(), "C:/elsewhere/b.mp3".into()]);
+        // Already in place: nothing to do.
+        assert_eq!(relocate_tracks(&conn, new).unwrap(), 0);
+    }
 
     fn mem() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

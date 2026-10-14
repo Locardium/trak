@@ -95,6 +95,11 @@ fn run() -> Result<()> {
     db::spawn_checkpointer(&db_file);
     // The name comes from the config: it's what shows up in the app.
     db::set_device_name(&conn, &cfg.name)?;
+    // `music_dir` may now point somewhere else (another disk).
+    let moved = db::relocate_tracks(&conn, &cfg.music_dir)?;
+    if moved > 0 {
+        log::info!("[server] {moved} tracks pointed at {}", cfg.music_dir.display());
+    }
 
     let hostage = Arc::new(ServerHost::new(conn, cfg.music_dir.clone()));
     // Generates the keypair on the first run.

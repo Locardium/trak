@@ -1877,6 +1877,11 @@ pub fn run() {
                 Err(e) => eprintln!("[lib] rel_path backfill failed: {e}"),
                 _ => {}
             }
+            match db::relocate_tracks(&conn, &music_dir) {
+                Ok(n) if n > 0 => eprintln!("[lib] {n} tracks pointed at the moved library folder"),
+                Err(e) => eprintln!("[lib] relocating tracks failed: {e}"),
+                _ => {}
+            }
             // This device's identity: generated once and never changes
             // again (it signs tombstones and breaks LWW ties).
             match (db::this_device_uid(&conn), db::device_name(&conn)) {

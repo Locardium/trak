@@ -227,7 +227,18 @@ Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que deber�
   `hooks.nsh`, `MAINBINARYNAME` = `trak`); portable copiado a una carpeta y abierto con otro
   cwd → `db.sqlite`, `library/`, `covers/`, `webview/` al lado del exe, nada en
   `%LOCALAPPDATA%`; en carpeta con escritura denegada → MessageBox y no crea nada.
-  Falta (usuario, pide UAC): instalar/actualizar/desinstalar.
+  Usuario 2026-10-13: la casilla "Delete the application data" del desinstalador no borraba
+  nada (Tauri sólo limpia `%APPDATA%`/`%LOCALAPPDATA%\<bundle id>`). Agregado
+  `NSIS_HOOK_POSTUNINSTALL` en `hooks.nsh`: con la casilla y sin `/UPDATE` borra por nombre
+  db/wal/shm, perf.log, `library`, `covers`, `trash`, `incoming`, `webview` y `RMDir` sin /r
+  de `$INSTDIR`. Confirmado por el usuario 2026-10-13. Sin commit.
+  Bug hallado 2026-10-13 (pregunta del usuario por USB/portable): `tracks.path` es absoluto y
+  nada lo corregía si la carpeta de datos se mueve (portable movido, otra letra de USB, la
+  mudanza manual de `Music\Sway`, `music_dir` del server en otro disco) → todos los temas
+  "faltantes". Fix: `db::relocate_tracks` (core) reescribe `path = music_dir/rel_path` al
+  arrancar, en la app (después de `backfill_rel_paths`) y en el server. Test
+  `relocate_points_tracks_at_the_new_folder`. Sin commit, falta probar moviendo una carpeta
+  real con música.
   Sin migración: el usuario mueve `Music\Sway` a mano (contenido de esa carpeta → carpeta de
   Trak). Ver PLAN 5.4.
   Además, en 5.6: con `TRAK_SERVER_TOKEN` seteado y sin config, el server arranca con

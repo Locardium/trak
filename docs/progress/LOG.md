@@ -5,6 +5,32 @@
 
 ---
 
+## 2026-10-13 · Rutas de temas al mover la carpeta de datos (`db::relocate_tracks`)
+
+- Hallazgo: la tabla `tracks` guarda `path` absoluto (UNIQUE) y `rel_path` (nombre dentro de
+  la biblioteca, plana). Ningún código reconstruía `path` desde `rel_path` al arrancar: sólo
+  `transfer`/`scope` lo hacen al recibir un archivo. Mover la carpeta (portable en USB con otra
+  letra, copiar `Music\Sway` a la carpeta de Trak como se planeó, cambiar `music_dir` del
+  server) dejaba todos los temas apuntando al lugar viejo.
+- Fix: `crates/core/src/db.rs` `relocate_tracks(conn, music_dir)` (una transacción, sólo filas
+  con `rel_path`, sólo las que difieren). Llamado en `app/src-tauri/src/lib.rs` setup después
+  de `backfill_rel_paths` (antes del watcher) y en `crates/server/src/main.rs` después de
+  `set_device_name`. Test en core. Tests: core 140, server, app 57 OK.
+- Respuesta al usuario sobre instalar el NSIS en un USB: funciona (en FAT32/exFAT `icacls`
+  falla sin cortar la instalación y no hace falta: no hay permisos), pero el acceso directo y
+  la entrada de "Programs" quedan atados a la letra; para USB conviene el portable.
+
+## 2026-10-13 · 5.4 desinstalador: "Delete the application data" ahora borra los datos de Trak
+
+- Reporte del usuario: marcando la casilla, la biblioteca quedaba. Causa: el template NSIS de
+  Tauri 2.11.4 sólo hace `RmDir /r` de `%APPDATA%` y `%LOCALAPPDATA%\<bundle id>`.
+- Fix: `NSIS_HOOK_POSTUNINSTALL` en `app/src-tauri/windows/hooks.nsh`, misma condición que
+  el template (`$DeleteAppDataCheckboxState = 1` y `$UpdateMode <> 1`), borra sólo lo que crea
+  Trak por nombre y después `RMDir "$INSTDIR"` sin `/r` (por si se instaló en una carpeta con
+  otras cosas). Las variables del template se pueden usar en el hook porque la macro se
+  expande dentro de `Section Uninstall`. `pnpm build:win` OK →
+  `Trak_1.0.0-beta.2_x64-setup.exe`. Sin probar (UAC).
+
 ## 2026-10-13 · 5.4 portable/instalador, 5.1 release, 5.2 READMEs, 5.6 Docker (sin commit)
 
 - 5.4: `app/src-tauri/src/data_dir.rs` nuevo (`resolve`, `check_writable`, `instance_suffix`,
