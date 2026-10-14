@@ -49,9 +49,3 @@ snow = { version = "0.10", default-features = false, features = [
     "use-sha2",
     "use-getrandom",
 ] }
-
-# The OS trash doesn't exist on Android (see db.rs::delete_tracks, which
-# deletes directly there). The rest of Trak's trash is our own and pure
-# filesystem (trash.rs), so it works everywhere.
-[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-trash = "5.2.6"

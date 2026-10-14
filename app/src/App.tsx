@@ -1474,7 +1474,7 @@ export default function App() {
       {modal?.type === 'confirm-tracks' && (
         <Confirm
           title="Delete from library"
-          message={`${modal.ids.length} track(s) are removed from the library and all playlists. Files managed by Trak go to the OS trash; others are left on disk.`}
+          message={`${modal.ids.length} track(s) are removed from the library and all playlists. Their files go to Trak's trash for 30 days; files outside the library are left on disk.`}
           confirmLabel="Delete"
           onConfirm={() => doDeleteTracks(modal.ids)}
           onClose={() => setModal(null)}

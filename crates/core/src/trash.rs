@@ -1,14 +1,14 @@
 //! The library's own trash.
 //!
-//! A deletion that arrives via sync doesn't destroy bytes. The file gets
-//! moved to `<trak>/trash/` and stays there for a long while before
-//! actually disappearing.
+//! No deletion destroys bytes: whether you delete a track yourself or the
+//! deletion arrives via sync, the file gets moved to `<trak>/trash/` and
+//! stays there for a long while before actually disappearing.
 //!
-//! The reason is the hard requirement of all of Phase 5: never lose music. A
-//! local deletion you did yourself while looking at the screen; one that
-//! arrives over the network could come from an out-of-sync device, an old
-//! tombstone, or a bug. The trash is what makes that case recoverable instead
-//! of final.
+//! The reason is the hard requirement of all of Phase 5: never lose music.
+//! One that arrives over the network could come from an out-of-sync device,
+//! an old tombstone, or a bug. A local one goes here too rather than to the
+//! OS trash, which doesn't exist on Android and, on Windows, not on USB
+//! sticks either: there a "recycled" file is simply gone.
 
 use crate::internal_dir::internal_base;
 use std::path::{Path, PathBuf};
@@ -52,13 +52,21 @@ pub fn move_to_trash(music_dir: &Path, path: &Path) -> std::io::Result<PathBuf> 
     // `rename` is cheap and atomic; the fallback covers the case where the
     // trash ends up on a different volume than the file.
     match std::fs::rename(path, &dest) {
-        Ok(()) => Ok(dest),
+        Ok(()) => {}
         Err(_) => {
             std::fs::copy(path, &dest)?;
             std::fs::remove_file(path)?;
-            Ok(dest)
         }
     }
+    // The retention clock is the file's mtime (`purge_old`), and a move keeps
+    // the original one: a track from last year would be purged on the next
+    // startup instead of 30 days from now. Best effort — if the date can't
+    // be set, the file is still in the trash.
+    let _ = std::fs::File::options()
+        .write(true)
+        .open(&dest)
+        .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    Ok(dest)
 }
 
 /// Actually deletes what has already met the retention period. Runs at startup.
@@ -144,6 +152,19 @@ mod tests {
         assert_eq!(purge_old(&music, RETENTION_DAYS), 0);
         // With zero retention, it goes.
         assert_eq!(purge_old(&music, 0), 1);
+        std::fs::remove_dir_all(&music).ok();
+    }
+
+    #[test]
+    fn an_old_file_gets_its_full_retention() {
+        // Music keeps the date it was ripped or downloaded: a year old here.
+        let music = tmpdir("old");
+        let f = music.join("old.flac");
+        std::fs::write(&f, b"x").unwrap();
+        let year_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(365 * 24 * 3600);
+        std::fs::File::options().write(true).open(&f).unwrap().set_modified(year_ago).unwrap();
+        move_to_trash(&music, &f).unwrap();
+        assert_eq!(purge_old(&music, RETENTION_DAYS), 0, "the 30 days start at deletion");
         std::fs::remove_dir_all(&music).ok();
     }
 }

@@ -5,6 +5,20 @@
 
 ---
 
+## 2026-10-13 · 5.7 borrar manda a la papelera de Trak + retención real de 30 días
+
+- Antes: borrar desde la app → Papelera de Windows (`trash::delete`, crate `trash`), en
+  Android `remove_file` (definitivo); borrados por sync → `trash/` de Trak. En un USB Windows
+  no hay Papelera: el "reciclado" era definitivo.
+- Ahora `crates/core/src/db.rs` `delete_tracks` → `crate::trash::move_to_trash` en todas las
+  plataformas; dependencia `trash` eliminada (`crates/core/Cargo.toml`, `Cargo.lock`).
+- Bug: `trash::purge_old` borra por mtime y `move_to_trash` (rename/copy) conservaba el mtime
+  del archivo → la música vieja se purgaba al siguiente arranque. Fix: `set_modified(now)` tras
+  mover (best effort). Test nuevo.
+- `App.tsx`: diálogo "Their files go to Trak's trash for 30 days; files outside the library
+  are left on disk." El README ya decía eso (ahora es cierto también para borrados manuales).
+- Tests: core 141, server, app 57, `tsc` OK.
+
 ## 2026-10-13 · Rutas de temas al mover la carpeta de datos (`db::relocate_tracks`)
 
 - Hallazgo: la tabla `tracks` guarda `path` absoluto (UNIQUE) y `rel_path` (nombre dentro de

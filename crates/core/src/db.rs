@@ -674,8 +674,9 @@ pub fn clear_analysis(conn: &Connection) -> Result<usize> {
 }
 
 /// Deletes tracks from the library. Files living under the managed
-/// folder `managed` get sent to the OS trash; ones outside it (legacy)
-/// aren't touched. The CASCADE removes them from all playlists.
+/// folder `managed` go to Trak's own trash (`trash.rs`, 30 days); ones
+/// outside it (legacy) aren't touched. The CASCADE removes them from all
+/// playlists.
 pub fn delete_tracks(conn: &mut Connection, managed: &std::path::Path, ids: &[i64]) -> Result<()> {
     // Gather paths and uids before deleting from the DB.
     let mut paths = Vec::new();
@@ -700,15 +701,10 @@ pub fn delete_tracks(conn: &mut Connection, managed: &std::path::Path, ids: &[i6
     for p in paths {
         let path = std::path::Path::new(&p);
         if path.starts_with(managed) && path.exists() {
-            // The `trash` crate doesn't support Android (no OS trash there).
-            // Best-effort: don't break if it fails.
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            {
-                let _ = trash::delete(path);
-            }
-            #[cfg(any(target_os = "android", target_os = "ios"))]
-            {
-                let _ = std::fs::remove_file(path);
+            // Best effort: the rows are already gone, a file that can't be
+            // moved just stays where it was.
+            if let Err(e) = crate::trash::move_to_trash(managed, path) {
+                log::warn!("[trash] could not move {}: {e}", path.display());
             }
         }
     }
