@@ -90,6 +90,11 @@ function stage(from, name) {
 }
 
 // 1. Refuse to run with uncommitted changes, so the release commit is clean.
+// The Tauri CLI rewrites this generated file on every Android run (whitespace
+// only: it re-applies `applicationIdSuffix`), which would trip the check below.
+try {
+  execSync("git checkout -- app/src-tauri/gen/android/app/build.gradle.kts", { cwd: root, stdio: "ignore" });
+} catch {}
 const status = execSync("git status --porcelain", { cwd: root }).toString().trim();
 if (status) {
   console.error("Working tree not clean. Commit or stash changes first:\n" + status);
