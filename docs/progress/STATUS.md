@@ -29,6 +29,11 @@ pushear). La rama `stable` no existe hasta el primer `pnpm release`.
 5. Pregunta abierta: ¿logo también dentro de la app (sidebar, pantalla vacía)? Si no, Fase 6.
 6. Fase 6 (rediseño de UI) se planea aparte. 1.7 parte B (reanudación Media3) sigue en reserva.
 
+- 🟡 Seguridad (2026-10-28, sin commit): path traversal al recibir archivos arreglado en
+  `crates/core` (`transfer.rs`, `import.rs`, `engine.rs`), con tests; falta commitear y que entre en
+  el próximo release (sin bump de protocolo). Detalle en LOG. Revisión de `db.rs`, `app/src-tauri/src`
+  y front pendiente.
+
 Antes de cada commit: `gen/android/app/build.gradle.kts` sale `w/mixed` por el CLI de Tauri →
 `git checkout` de ese archivo.
 

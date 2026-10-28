@@ -5,6 +5,48 @@
 
 ---
 
+## 2026-10-28 · Seguridad: path traversal al recibir archivos (security-review de core + server)
+
+- Hallazgo (alta): `filename` (de `Msg::BlobPush` y del manifest remoto) y `hash` los manda el peer y
+  `transfer::receive_file` hacía `managed.join(filename)` / `<hash>.part` sin validar. Un peer pareado
+  (o un server/peer comprometido hacia los clientes) escribía archivos fuera de `music_dir` con `..`,
+  rutas absolutas o letras de unidad (p. ej. carpeta Inicio de Windows). El chequeo de hash no protegía:
+  el atacante elige contenido y hash.
+- Fix (sin cambio de protocolo: `PROTOCOL` sigue en 3, `protocol_fingerprint` pasa):
+  - `transfer.rs`: `is_blob_hash` (64 hex minúscula) validado en `receive_file`, `pull_file` y `claim_push`;
+    tras `managed_dest_for` se exige `dest.parent() == music_dir`; si `dest` ya existe con los mismos bytes
+    no se toca, si son distintos se usa `import::unique_dest_for` (antes un archivo con mismo nombre y
+    tamaño se pisaba con `rename`, rompía el invariante "nunca se sobrescribe audio").
+  - `import.rs`: `sanitize_filename` (un solo componente: `/ \ : * ? " < > |` y controles → `_`, sin
+    puntos/espacios en los bordes, nombres reservados de Windows con prefijo `_`, vacío → `track`) usado por
+    `managed_dest_for`; nuevo `unique_dest_for`.
+  - `engine.rs`: en `BlobPush`, hash inválido → warn + `BlobPushAck { wanted: false }`.
+- Tests nuevos en `transfer.rs`: `a_hostile_filename_cannot_leave_the_library`,
+  `a_hash_that_is_not_a_digest_is_refused`, `filenames_are_reduced_to_one_safe_component`,
+  `same_name_and_size_but_different_bytes_is_not_overwritten`. `cargo test -p trak-core` (146) y
+  `-p trak-server` pasan. Sin commit.
+- Gotchas: `import.rs` y `engine.rs` son CRLF (editar con cuidado). Nombres con `:` (Android) ahora llegan a
+  Windows con `_`.
+- Segunda pasada (misma fecha): `db.rs` (todo `format!` en SQL usa constantes internas; datos del peer van
+  por parámetros), `merge.rs::apply`, `app/src-tauri/src` (`lib.rs` comandos, `pairing.rs`, `discovery.rs`,
+  `xml_sync.rs`, `export_xml.rs`), capabilities, `tauri.conf.json`, front (sin `dangerouslySetInnerHTML`,
+  `innerHTML` ni `eval`; carátulas por data-URL) y manifests Android (servicios `exported=false`).
+  Sin hallazgos nuevos explotables. `reveal_track` arma `explorer /select,"<path>"` con `raw_arg`: antes
+  del fix un `"` en un nombre del peer podía inyectar argumentos; `sanitize_filename` lo cierra.
+- Abiertos, NO arreglados (decisiones de diseño):
+  1. Código de emparejado (`wire::sas_code`): 6 dígitos de 4 bytes del hash. Un MITM activo en la LAN puede
+     probar claves estáticas hasta que los dos códigos coincidan (~1e6 intentos, del orden de segundos a
+     un minuto) mientras la persona mira el diálogo (`IO_TIMEOUT` 180 s). Arreglo real = compromiso previo
+     tipo ZRTP (cambia el protocolo → subir `PROTOCOL`/`MIN_PROTOCOL`).
+  2. `csp: null` en `tauri.conf.json`: hoy no hay sink de XSS, pero un CSP sería defensa en profundidad
+     (probar en dev y Android antes: IPC, data-URL de carátulas, estilos inline).
+  3. Un peer pareado puede borrar la biblioteca vía tombstones (el server los aplica sin preguntar). Es el
+     modelo de confianza actual; el `pair_token` es la única credencial del server y no hay límite de
+     intentos.
+  4. `file_paths.xml` (FileProvider) expone `external-path "."`; el provider es `exported=false`, bajo riesgo.
+
+---
+
 ## 2026-10-27 · `release:win` pasa a `release`
 
 - Pedido del usuario: un solo comando de release para todo. `scripts/release-win.js` → `scripts/release.js`,

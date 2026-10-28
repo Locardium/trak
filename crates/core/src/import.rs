@@ -224,9 +224,65 @@ fn import_one(conn: &Connection, managed: &Path, src: &Path) -> Result<i64> {
     insert_track(conn, &dest)
 }
 
+/// Reduces a name that came from another device to ONE safe path component.
+///
+/// The name is the peer's word: it can carry `..`, separators or a drive
+/// letter, and `Path::join` obeys all of them (an absolute name even replaces
+/// the base). Anything that could name another place becomes `_`, and what
+/// Windows treats specially (trailing dots/spaces, device names) is defused.
+pub fn sanitize_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches(|c| c == ' ' || c == '.');
+    if cleaned.is_empty() {
+        return "track".into();
+    }
+    let stem = cleaned.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && stem.as_bytes()[3].is_ascii_digit());
+    if reserved {
+        return format!("_{cleaned}");
+    }
+    cleaned.to_string()
+}
+
+/// A free destination for `name` inside `managed`: the name itself if it is
+/// not taken, otherwise "name (2)", "name (3)"... Never an existing file.
+pub fn unique_dest_for(managed: &Path, name: &str) -> PathBuf {
+    let name = sanitize_filename(name);
+    let first = managed.join(&name);
+    if !first.exists() {
+        return first;
+    }
+    let stem = Path::new(&name).file_stem().and_then(|s| s.to_str()).unwrap_or("track");
+    let ext = Path::new(&name).extension().and_then(|s| s.to_str()).unwrap_or("");
+    let mut i = 2;
+    loop {
+        let cand = if ext.is_empty() {
+            managed.join(format!("{stem} ({i})"))
+        } else {
+            managed.join(format!("{stem} ({i}).{ext}"))
+        };
+        if !cand.exists() {
+            return cand;
+        }
+        i += 1;
+    }
+}
+
 /// Same as `managed_dest` but without a source file on disk to stat (the
 /// bytes are already in memory — see `import_bytes`).
 pub fn managed_dest_for(managed: &Path, name: &str, size: u64) -> PathBuf {
+    let name = sanitize_filename(name);
+    let name = name.as_str();
     let dest = managed.join(name);
     if dest.exists() {
         let dsize = std::fs::metadata(&dest).ok().map(|m| m.len());

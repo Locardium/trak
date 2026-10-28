@@ -31,6 +31,15 @@ use std::path::{Path, PathBuf};
 /// frames (Noise's cap); this is just how much is read from disk per round.
 const CHUNK: usize = 1024 * 1024;
 
+/// A blake3 hex digest, exactly what `hashing::hash_file` produces.
+///
+/// The hash arrives from the peer and ends up in file names (`<hash>.part`),
+/// so anything that isn't 64 hex digits (`../`, separators, drive letters)
+/// must never get that far.
+pub fn is_blob_hash(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Half-finished downloads. Deliberately kept on the same filesystem as the
 /// managed folder (`rename()` is only atomic within one filesystem, and on
 /// Android the app folder and the music folder can be on different
@@ -69,6 +78,9 @@ impl Drop for PushClaim {
 
 /// `None` if this file is already coming in through another session.
 pub fn claim_push(music_dir: &Path, hash: &str) -> Option<PushClaim> {
+    if !is_blob_hash(hash) {
+        return None;
+    }
     let part = push_part_path(music_dir, hash);
     let mut busy = RECEIVING.lock().unwrap_or_else(|e| e.into_inner());
     if busy.contains(&part) {
@@ -160,6 +172,9 @@ pub fn receive_file(
     progress: &mut dyn FnMut(u64, u64),
     mark_expected: &mut dyn FnMut(&Path),
 ) -> Result<Received> {
+    if !is_blob_hash(hash) {
+        return Err(anyhow!("the peer sent an invalid file hash: {hash:?}"));
+    }
     let incoming = incoming_dir(music_dir);
     std::fs::create_dir_all(&incoming)?;
     let part = if push { push_part_path(music_dir, hash) } else { part_path(music_dir, hash) };
@@ -217,7 +232,26 @@ pub fn receive_file(
         return Err(anyhow!("hash mismatch (expected {hash}, got {actual})"));
     }
 
-    let dest = crate::import::managed_dest_for(music_dir, filename, got);
+    // `filename` comes from the peer. `managed_dest_for` reduces it to a single
+    // safe component; this is the second lock on the door, so that whatever
+    // changes there, bytes never land outside the managed folder.
+    let mut dest = crate::import::managed_dest_for(music_dir, filename, got);
+    if dest.parent() != Some(music_dir) {
+        let _ = std::fs::remove_file(&part);
+        return Err(anyhow!("the destination of {filename:?} is outside the library"));
+    }
+    if dest.exists() {
+        // A file with the same name and size is not necessarily the same
+        // file. Same bytes: nothing to do. Different: it is never overwritten.
+        if crate::hashing::hash_file(&dest).map(|h| h == hash).unwrap_or(false) {
+            let _ = std::fs::remove_file(&part);
+            return Ok(Received {
+                path: dest,
+                bytes: got,
+            });
+        }
+        dest = crate::import::unique_dest_for(music_dir, filename);
+    }
     mark_expected(&dest);
     // `rename` within the same filesystem is atomic: the file appears whole or
     // doesn't appear at all. It never ends up half-done in the library.
@@ -240,6 +274,9 @@ pub fn pull_file(
     progress: &mut dyn FnMut(u64, u64),
     mark_expected: &mut dyn FnMut(&Path),
 ) -> Result<Received> {
+    if !is_blob_hash(hash) {
+        return Err(anyhow!("the peer listed an invalid file hash: {hash:?}"));
+    }
     let offset = resume_offset(music_dir, hash);
     if offset > 0 {
         log::info!("[sync] resuming {filename} from {offset} bytes");
@@ -609,6 +646,109 @@ mod tests {
         assert_eq!(state, "present");
         assert_eq!(path, again.to_string_lossy());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The filename is the sender's word: `../`, an absolute path or a drive
+    /// letter cannot make the file land outside the managed folder.
+    #[test]
+    fn a_hostile_filename_cannot_leave_the_library() {
+        for evil in [
+            "../escaped.flac",
+            "..\\escaped.flac",
+            "a/../../escaped.flac",
+            "/tmp/escaped.flac",
+            "C:\\Windows\\escaped.flac",
+            "..",
+            "",
+        ] {
+            let src_dir = tmpdir("evil-src");
+            let root = tmpdir("evil-root");
+            let dst_dir = root.join("library");
+            std::fs::create_dir_all(&dst_dir).unwrap();
+            let src = src_dir.join("track.flac");
+            std::fs::write(&src, sample(3000)).unwrap();
+            let hash = crate::hashing::hash_file(&src).unwrap();
+
+            let (mut client, mut server) = pair();
+            let h = hash.clone();
+            let sender = std::thread::spawn(move || {
+                let offset = match server.recv().unwrap() {
+                    Msg::BlobReq { offset, .. } => offset,
+                    other => panic!("unexpected: {other:?}"),
+                };
+                send_file(&mut server, &src, offset, &h, &mut |_, _| {}).unwrap();
+            });
+            let got = pull_file(&mut client, &dst_dir, &hash, evil, (1, 1), &mut |_, _| {}, &mut |_| {})
+                .unwrap();
+            sender.join().unwrap();
+
+            assert_eq!(got.path.parent(), Some(dst_dir.as_path()), "{evil:?} escaped");
+            assert!(!root.join("escaped.flac").exists(), "{evil:?} wrote outside the library");
+            std::fs::remove_dir_all(&src_dir).ok();
+            std::fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// The hash also becomes a file name (`<hash>.part`).
+    #[test]
+    fn a_hash_that_is_not_a_digest_is_refused() {
+        let dst_dir = tmpdir("badhash");
+        assert!(!is_blob_hash("../../x"));
+        assert!(!is_blob_hash(&"A".repeat(64)));
+        assert!(!is_blob_hash(&"0".repeat(63)));
+        assert!(is_blob_hash(&"0".repeat(64)));
+        assert!(claim_push(&dst_dir, "../../x").is_none());
+        let (mut client, _server) = pair();
+        let err = pull_file(&mut client, &dst_dir, "../../x", "x.flac", (1, 1), &mut |_, _| {}, &mut |_| {})
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid file hash"), "error: {err}");
+        std::fs::remove_dir_all(&dst_dir).ok();
+    }
+
+    #[test]
+    fn filenames_are_reduced_to_one_safe_component() {
+        use crate::import::sanitize_filename as s;
+        assert_eq!(s("song.flac"), "song.flac");
+        assert_eq!(s("../a.flac"), "_a.flac");
+        assert_eq!(s("C:\\x\\a.flac"), "C__x_a.flac");
+        assert_eq!(s(".."), "track");
+        assert_eq!(s("  . "), "track");
+        assert_eq!(s("nul.flac"), "_nul.flac");
+        assert_eq!(s("COM1"), "_COM1");
+        assert_eq!(s("a\0b.flac"), "a_b.flac");
+    }
+
+    /// Same name and same size is not the same file: it must not be replaced.
+    #[test]
+    fn same_name_and_size_but_different_bytes_is_not_overwritten() {
+        let src_dir = tmpdir("same-src");
+        let dst_dir = tmpdir("same-dst");
+        let src = src_dir.join("same.flac");
+        let data = sample(3000);
+        std::fs::write(&src, &data).unwrap();
+        let hash = crate::hashing::hash_file(&src).unwrap();
+        let existing = dst_dir.join("same.flac");
+        let other = vec![7u8; 3000];
+        std::fs::write(&existing, &other).unwrap();
+
+        let (mut client, mut server) = pair();
+        let h = hash.clone();
+        let sender = std::thread::spawn(move || {
+            let offset = match server.recv().unwrap() {
+                Msg::BlobReq { offset, .. } => offset,
+                other => panic!("unexpected: {other:?}"),
+            };
+            send_file(&mut server, &src, offset, &h, &mut |_, _| {}).unwrap();
+        });
+        let got = pull_file(&mut client, &dst_dir, &hash, "same.flac", (1, 1), &mut |_, _| {}, &mut |_| {})
+            .unwrap();
+        sender.join().unwrap();
+
+        assert_ne!(got.path, existing);
+        assert_eq!(std::fs::read(&existing).unwrap(), other, "the existing file was replaced");
+        assert_eq!(std::fs::read(&got.path).unwrap(), data);
+        std::fs::remove_dir_all(&src_dir).ok();
+        std::fs::remove_dir_all(&dst_dir).ok();
     }
 
     #[test]

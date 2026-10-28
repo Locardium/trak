@@ -281,6 +281,13 @@ pub fn serve_requests<H: Host>(
                 ..
             } => {
                 let music_dir = host.music_dir();
+                // The hash and the name are the peer's word and end up in file
+                // names: refuse before any byte travels.
+                if !crate::transfer::is_blob_hash(&hash) {
+                    log::warn!("[sync] {peer_uid} pushed a file with an invalid hash: refused");
+                    sess.send(&Msg::BlobPushAck { wanted: false })?;
+                    continue;
+                }
                 // Asked before any byte travels (2.6): not if it's already
                 // here, nor if another session is receiving it right now —
                 // two devices pushing the same file to the server at once
