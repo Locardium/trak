@@ -42,8 +42,9 @@
   --control-h-sm: 26px;
 
   /* The floating player overlaps the bottom of every scroll area; each one
-     used to reserve a different amount (96 / 96 / 110). */
-  --player-clear: 96px;
+     used to reserve a different amount (96 / 96 / 110). 0 with no player;
+     PlayerBar.tsx sets the real figure while it is on screen. */
+  --player-clear: 0px;
   /* The player's own inset from the window edge — toasts align to it. */
   --player-inset: 12px;
 
@@ -145,9 +146,13 @@ button.danger-btn {
   background: var(--bg);
   border-right: 1px solid var(--line);
   display: flex; flex-direction: column;
-  padding: var(--space-sm) 0 var(--player-clear);
+  padding: var(--space-sm) 0 0;
   overflow-y: auto;
 }
+/* A real element instead of bottom padding: padding at the end of a scrolling
+   flex column is not always counted in the scroll height, which left the last
+   rows stuck behind the floating player. */
+.sidebar::after { content: ''; flex: none; height: calc(var(--player-clear) + var(--space-sm)); }
 /* Left padding matches a row's icon column (row margin 4 + row padding 12),
    so the section label sits exactly above the icons under it. Right padding
    is short by the action buttons' own padding, so they land on the same
@@ -165,7 +170,7 @@ button.danger-btn {
 }
 .tree-actions button:hover { color: var(--accent); background: var(--panel-2); }
 
-.tree { flex: 1; min-height: 140px; }
+.tree { flex: 1 0 auto; min-height: 140px; }
 .tree.drop-root { box-shadow: inset 0 -2px 0 var(--accent); }
 .tree-empty {
   color: var(--muted); font-size: 12px; margin: 0;
@@ -641,6 +646,10 @@ button.ctl.stop { color: var(--muted); }
    obvious without reading the number. */
 .knob.active .knob-pointer { stroke: var(--text); }
 .knob:hover .knob-pointer { stroke: var(--accent); }
+/* Locked while volume normalization is on: shows the saved trim, takes no input. */
+.knob.disabled { cursor: not-allowed; opacity: 0.4; }
+.knob.disabled .knob-pointer { stroke: var(--muted); }
+.knob.disabled .knob-arc { stroke: var(--muted); }
 
 /* ---------- Unified slider (.range): volume, settings, etc. ---------- */
 input.range {
@@ -756,7 +765,7 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
    clearance, so they read as part of the same floating layer. */
 .import-toast {
   position: fixed; z-index: var(--z-toast, 45);
-  right: var(--player-inset); bottom: var(--player-clear);
+  right: var(--player-inset); bottom: max(var(--player-clear), var(--player-inset));
   width: min(320px, calc(100vw - var(--player-inset) * 2));
   background: var(--panel-2);
   border: 1px solid var(--line);
@@ -789,7 +798,6 @@ input.range:active::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-so
    squeezing the title away: now-playing and the right-hand controls on top,
    transport and seek across the full width underneath. */
 @media (max-width: 760px) {
-  :root { --player-clear: 148px; }
   footer.player {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas: "np right" "center center";
@@ -856,7 +864,7 @@ table.tracks th.col-drop-after { box-shadow: inset -2px 0 0 var(--accent); }
 
 .status-toast {
   position: fixed; z-index: var(--z-menu);
-  left: var(--player-inset); bottom: var(--player-clear);
+  left: var(--player-inset); bottom: max(var(--player-clear), var(--player-inset));
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 12px;

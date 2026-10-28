@@ -468,6 +468,18 @@ fn migrate(conn: &Connection) -> Result<()> {
         "UPDATE playlist_tracks SET added_at = ?1 WHERE added_at = 0",
         [now_ms()],
     )?;
+    // Stored measurements made under older analyzer rules are thrown away so
+    // the sweep redoes them, once per bump of `ANALYSIS_REV`. Rev 3: the tail
+    // is no longer capped at 12 s, and ends at -50 dBFS instead of -60.
+    if has_table(conn, "app_settings")? {
+        let rev: u32 = get_setting(conn, SETTING_ANALYSIS_REV)?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+        if rev < ANALYSIS_REV {
+            clear_analysis(conn)?;
+            set_setting(conn, SETTING_ANALYSIS_REV, &ANALYSIS_REV.to_string())?;
+        }
+    }
     Ok(())
 }
 
@@ -718,6 +730,11 @@ pub fn delete_tracks(conn: &mut Connection, managed: &std::path::Path, ids: &[i6
 const SETTING_AUTO_SYNC_XML: &str = "auto_sync_xml";
 const SETTING_DEVICE_UID: &str = "device_uid";
 const SETTING_DEVICE_NAME: &str = "device_name";
+/// Which analyzer rules the stored measurements follow (see `migrate`).
+const SETTING_ANALYSIS_REV: &str = "analysis_rev";
+/// Bump when the analyzer changes what it measures, so every device measures
+/// its library again on the next start.
+const ANALYSIS_REV: u32 = 3;
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
     conn.query_row("SELECT value FROM app_settings WHERE key = ?1", [key], |r| r.get(0))
@@ -827,12 +844,12 @@ pub fn set_auto_sync_xml(conn: &Connection, enabled: bool) -> Result<()> {
 
 /// The reference level normalization aims for.
 ///
-/// -14 rather than the -18 of ReplayGain 2.0: a DJ library is mastered hot
-/// (this one sits between -4 and -8 LUFS), and aiming at -18 pulled every
-/// track down so far that the whole app just sounded quiet. -14 is the level
-/// the streaming services settled on for the same reason, and it still leaves
-/// 14 dB of headroom.
-pub const TARGET_LUFS: f64 = -14.0;
+/// -10 rather than the -18 of ReplayGain 2.0 or the -14 of the streaming
+/// services: a DJ library is mastered hot (this one sits between -4 and -8
+/// LUFS), and aiming lower pulled every track down so far that the whole app
+/// just sounded quiet. Higher than this and quiet tracks hit
+/// `PEAK_CEILING_DB` before reaching the target, so they stay below it anyway.
+pub const TARGET_LUFS: f64 = -10.0;
 
 /// Where normalization stops boosting: the loudest sample may reach this,
 /// not more. -1 and not 0 because the peak is measured on samples, and the
@@ -941,12 +958,13 @@ impl From<StoredPrefs> for PlaybackPrefs {
     }
 }
 
-/// How loud to play a track, in dB relative to the file: the manual trim,
-/// plus what normalization asks for when it's on and the track was measured.
+/// How loud to play a track, in dB relative to the file: the manual trim with
+/// normalization off, what normalization asks for with it on.
 ///
-/// The two add up rather than one replacing the other, which is how a DJ
-/// mixer behaves: auto-gain sets the baseline, the trim knob is what you do
-/// on top of it when the baseline is wrong for this room.
+/// With normalization on the trim does not apply at all (the knob is disabled
+/// in the UI): two things fighting over the level is how a track ends up
+/// nowhere near the target. The stored value is kept, so it comes back as it
+/// was when normalization goes off. A track not measured yet plays at 0 dB.
 ///
 /// With normalization on, a boost never pushes the loudest sample past
 /// `PEAK_CEILING_DB` (3.1: it used to boost hot files straight into
@@ -959,11 +977,13 @@ pub fn playback_gain_db(
     peak_db: Option<f64>,
     normalize: bool,
 ) -> f64 {
-    let Some(lufs) = loudness_lufs.filter(|_| normalize) else {
-        // Not measured yet (or normalization off): the trim alone decides.
+    if !normalize {
         return gain_db.clamp(-MAX_CUT_DB, MAX_GAIN_DB);
+    }
+    let Some(lufs) = loudness_lufs else {
+        return 0.0;
     };
-    let gain = gain_db + TARGET_LUFS - lufs;
+    let gain = TARGET_LUFS - lufs;
     let headroom = match peak_db {
         Some(peak) => (PEAK_CEILING_DB - peak).max(0.0),
         None => UNKNOWN_PEAK_MAX_BOOST_DB,
@@ -1445,12 +1465,12 @@ mod tests {
     /// cut is never limited by it.
     #[test]
     fn a_boost_stops_at_the_peak_ceiling() {
-        // -20 LUFS wants +6; a peak at -3 dBFS leaves room for +2 only.
+        // -20 LUFS wants +10; a peak at -3 dBFS leaves room for +2 only.
         assert_eq!(playback_gain_db(0.0, Some(-20.0), Some(-3.0), true), 2.0);
         // Already at the ceiling: no boost at all, but no cut either.
         assert_eq!(playback_gain_db(0.0, Some(-20.0), Some(0.0), true), 0.0);
         // A loud track is still brought down, whatever its peak.
-        assert_eq!(playback_gain_db(0.0, Some(-8.0), Some(0.0), true), -6.0);
+        assert_eq!(playback_gain_db(0.0, Some(-8.0), Some(0.0), true), -2.0);
         // Peak not measured yet: a small boost at most.
         assert_eq!(playback_gain_db(0.0, Some(-20.0), None, true), UNKNOWN_PEAK_MAX_BOOST_DB);
         // With normalization off the trim is the user's, peak or not.
@@ -1462,18 +1482,20 @@ mod tests {
     #[test]
     fn normalization_moves_the_track_to_the_target_level() {
         assert_eq!(playback_gain_db(0.0, Some(TARGET_LUFS), ROOM, true), 0.0);
-        // -22 LUFS against a -14 target: 8 dB short.
-        assert_eq!(playback_gain_db(0.0, Some(-22.0), ROOM, true), 8.0);
-        // -8 LUFS is 6 dB too loud.
-        assert_eq!(playback_gain_db(0.0, Some(-8.0), ROOM, true), -6.0);
+        // -20 LUFS against a -10 target: 10 dB short.
+        assert_eq!(playback_gain_db(0.0, Some(-20.0), ROOM, true), 10.0);
+        // -8 LUFS is 2 dB too loud.
+        assert_eq!(playback_gain_db(0.0, Some(-8.0), ROOM, true), -2.0);
     }
 
-    /// The trim rides on top of normalization rather than replacing it —
-    /// that's the point of having both, and it's how a mixer behaves.
+    /// With normalization on the stored trim has no effect (the knob is
+    /// disabled), but it isn't lost: off again, it applies as before.
     #[test]
-    fn the_trim_adds_on_top_of_normalization() {
-        assert_eq!(playback_gain_db(2.0, Some(-18.0), ROOM, true), 6.0);
-        assert_eq!(playback_gain_db(-2.0, Some(-18.0), ROOM, true), 2.0);
+    fn the_trim_is_ignored_while_normalizing() {
+        assert_eq!(playback_gain_db(2.0, Some(-18.0), ROOM, true), 8.0);
+        assert_eq!(playback_gain_db(-2.0, Some(-18.0), ROOM, true), 8.0);
+        assert_eq!(playback_gain_db(4.0, None, ROOM, true), 0.0);
+        assert_eq!(playback_gain_db(2.0, Some(-18.0), ROOM, false), 2.0);
     }
 
     /// An unmeasured track is left alone rather than guessed at: asking for a
@@ -1482,7 +1504,7 @@ mod tests {
     #[test]
     fn an_unmeasured_track_is_not_corrected() {
         assert_eq!(playback_gain_db(0.0, None, ROOM, true), 0.0);
-        assert_eq!(playback_gain_db(4.0, None, ROOM, true), 4.0);
+        assert_eq!(playback_gain_db(4.0, None, ROOM, true), 0.0);
     }
 
     /// One badly measured track (a long quiet intro read as the whole thing)
@@ -1499,9 +1521,9 @@ mod tests {
     /// for — still standing out.
     #[test]
     fn a_loud_master_is_brought_all_the_way_down() {
-        // A real track out of this library: -4.2 LUFS wants -9.8 dB against
-        // the -14 reference.
-        assert!((playback_gain_db(0.0, Some(-4.2), ROOM, true) - (-9.8)).abs() < 1e-9);
+        // A real track out of this library: -4.2 LUFS wants -5.8 dB against
+        // the -10 reference.
+        assert!((playback_gain_db(0.0, Some(-4.2), ROOM, true) - (-5.8)).abs() < 1e-9);
         // The floor is still there for a nonsense measurement.
         assert_eq!(playback_gain_db(0.0, Some(40.0), ROOM, true), -MAX_CUT_DB);
     }
@@ -1537,6 +1559,22 @@ mod tests {
         );
         // The other track is untouched.
         assert_eq!(track_playback(&conn, b).unwrap(), TrackPlayback::default());
+    }
+
+    /// Measurements from an older analyzer are redone, once.
+    #[test]
+    fn measurements_from_an_older_analyzer_are_redone_once() {
+        let conn = mem();
+        let a = add_track(&conn, "/music/a.wav");
+        set_track_analysis(&conn, a, -9.0, -0.1, 0, 180_352).unwrap();
+        set_setting(&conn, SETTING_ANALYSIS_REV, "2").unwrap();
+
+        migrate(&conn).unwrap();
+        assert_eq!(track_playback(&conn, a).unwrap().audio_end_ms, None);
+
+        set_track_analysis(&conn, a, -9.0, -0.1, 0, 167_000).unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(track_playback(&conn, a).unwrap().audio_end_ms, Some(167_000));
     }
 
     /// The sweep only offers tracks whose bytes are actually here: measuring

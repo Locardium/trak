@@ -1,6 +1,6 @@
 // Bump version, commit, tag, build every artifact, stage them in dist/<tag>/
 // and publish the GitHub Release from there (Phase 5.1).
-// Usage: node scripts/release-win.js 1.0.0-beta.1
+// Usage: pnpm release 1.0.0-beta.1   (node scripts/release.js <version>)
 //
 // What ends up in dist/<tag>/ (and in the release), with fixed names so
 // `releases/latest/download/<name>` links keep working across versions:
@@ -25,7 +25,7 @@ const path = require("path");
 
 const version = process.argv[2];
 if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/.test(version)) {
-  console.error("Usage: node scripts/release-win.js <version>  (e.g. 1.0.0-beta.1)");
+  console.error("Usage: pnpm release <version>  (e.g. 1.0.0-beta.1)");
   process.exit(1);
 }
 

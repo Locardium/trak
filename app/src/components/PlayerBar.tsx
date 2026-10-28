@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import {
   Pause,
   Play,
@@ -41,6 +41,8 @@ interface Props {
   onSeek: (secs: number) => void;
   onVolume: (v: number) => void;
   onGain: (gainDb: number) => void;
+  /// Volume normalization decides the level, so the trim knob is locked.
+  normalize?: boolean;
   onToggleShuffle: () => void;
   onCycleRepeat: () => void;
   /// Hidden on the phone, where the hardware buttons already are the volume
@@ -85,11 +87,33 @@ export default function PlayerBar({
   onSeek,
   onVolume,
   onGain,
+  normalize = false,
   onToggleShuffle,
   onCycleRepeat,
   showVolume = true,
 }: Props) {
   const barRef = useRef<HTMLDivElement>(null);
+  const footerRef = useRef<HTMLElement>(null);
+  // The lists under the floating player scroll with `--player-clear` of
+  // padding so their last row can come out from under it. A fixed number was
+  // shorter than the real player (two-line title, window width, font scale),
+  // which left the last rows hidden behind it. Follow its actual height.
+  useLayoutEffect(() => {
+    const el = footerRef.current;
+    if (!el) return;
+    const root = document.documentElement;
+    const apply = () => {
+      const bottom = parseFloat(getComputedStyle(el).bottom) || 0;
+      root.style.setProperty('--player-clear', `${Math.ceil(el.offsetHeight + bottom + 12)}px`);
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      root.style.removeProperty('--player-clear');
+    };
+  }, []);
   // While dragging, the bar shows the finger/mouse position and the actual
   // seek is only sent on release (a seek per pixel moved overworks the
   // backend and looks worse).
@@ -122,7 +146,7 @@ export default function PlayerBar({
   }
 
   return (
-    <footer className={'player' + (closing ? ' closing' : '')}>
+    <footer ref={footerRef} className={'player' + (closing ? ' closing' : '')}>
       <div className="np">
         {/* Stop lives on the artwork, revealed on hover. It's the one
             transport action you almost never want mid-set, and it was taking
@@ -194,6 +218,7 @@ export default function PlayerBar({
             label="Gain"
             format={fmtGain}
             onChange={onGain}
+            disabled={normalize}
           />
           <span className="gain-value">{fmtGain(track.gainDb)}</span>
         </div>

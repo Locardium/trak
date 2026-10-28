@@ -693,12 +693,12 @@ la Fase 6.
 
 ### 5.1 Todos los releases en una carpeta (notes: AGREGAR)
 
-Hoy los artefactos quedan desparramados y `scripts/release-win.js` los busca por ruta hardcodeada
+Hoy los artefactos quedan desparramados y `scripts/release.js` (antes `release-win.js`) los busca por ruta hardcodeada
 (`:99-118`): MSI en `target/release/bundle/msi`, server win en `target/release/`, server linux en
 `target/x86_64-unknown-linux-musl/release/`, y el APK en
 `app/src-tauri/gen/android/app/build/outputs/` **que ningún script recoge**.
 
-Fix: paso de staging en `release-win.js` después del build → copiar todo a `dist/<tag>/` con nombres
+Fix: paso de staging en `release.js` después del build → copiar todo a `dist/<tag>/` con nombres
 finales (`Trak-<tag>-setup.exe`, `Trak-<tag>-portable.exe`, `trak-<tag>.apk`, `trak-server-windows.exe`, `trak-server-linux`; MSI ya no, ver 5.4), y que
 `gh release create` suba desde ahí. Agregar `pnpm build:android` al release. Agregar `dist/` al
 `.gitignore`. De paso: `scripts/bump-version.js` no bumpea `crates/server/Cargo.toml`.
@@ -732,7 +732,7 @@ AppData). Pedido: TODO directo en la carpeta del exe, sin subcarpeta, tanto port
 instalada. Regla única: datos = carpeta del exe.
 
 Decidido con el usuario (2026-10-13):
-- Instalador **NSIS** (no MSI: WiX exige versión numérica, ver `release-win.js`; los permisos
+- Instalador **NSIS** (no MSI: WiX exige versión numérica, ver `release.js`; los permisos
   en NSIS son un hook). `installMode` perMachine: admin UNA vez al instalar. Default
   `C:\Program Files\Trak`, el usuario puede elegir otra carpeta.
 - Hook post-install: `icacls "$INSTDIR" /grant *S-1-5-32-545:(OI)(CI)M` (SID de Users, anda
@@ -812,6 +812,6 @@ notificación.
 4. Soltar un archivo en el medio de la lista → entra en esa posición. Arrastrar un track de Sway a
    una carpeta del Explorer → copia el archivo.
 
-**Fase 5.** `pnpm release:win 1.0.0-beta.2` en un clon limpio → `dist/v1.0.0-beta.2/` con los cuatro
+**Fase 5.** `pnpm release 1.0.0-beta.2` en un clon limpio → `dist/v1.0.0-beta.2/` con los cuatro
 artefactos y el release de GitHub con los cuatro adjuntos. Seguir el README de Linux de cero en una
 VM Ubuntu hasta emparejar un device.

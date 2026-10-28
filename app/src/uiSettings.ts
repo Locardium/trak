@@ -28,6 +28,10 @@ export function useUiSetting<T>(
     /// change while dragging; a discrete toggle just waits this long before
     /// its single write.
     writeDelayMs?: number;
+    /// Called with the stored value once it has been read and applied. For
+    /// state that lives somewhere else too (the audio backend) and has to be
+    /// told what was restored, not what the component started with.
+    onLoad?: (value: T) => void;
   },
 ) {
   const [value, setValue] = useState<T>(initial);
@@ -36,6 +40,8 @@ export function useUiSetting<T>(
   // every render.
   const codec = useRef({ decode, encode });
   codec.current = { decode, encode };
+  const onLoad = useRef(opts?.onLoad);
+  onLoad.current = opts?.onLoad;
 
   const enabled = opts?.enabled ?? true;
   const legacyKey = opts?.legacyKey;
@@ -68,7 +74,10 @@ export function useUiSetting<T>(
       if (!alive) return;
       if (raw != null) {
         const parsed = codec.current.decode(raw);
-        if (parsed != null) setValue(parsed);
+        if (parsed != null) {
+          setValue(parsed);
+          onLoad.current?.(parsed);
+        }
       }
       loaded.current = true;
       if (carriedOver && legacyKey) localStorage.removeItem(legacyKey);

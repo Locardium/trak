@@ -4,12 +4,12 @@
 > Detalle de cada ítem (causa raíz, archivos, fix): `PLAN-BETA1.md`. Historia: `LOG.md`.
 > Lista original del usuario: `notes.txt` (raíz, gitignoreado).
 
-**Última actualización:** 2026-10-14 (Fase 5 hecha en código y commiteada; falta probar y publicar)
+**Última actualización:** 2026-10-27 (ajustes de audio/UI confirmados; release beta.2 en curso)
 **Fase actual:** Fase 5 — release y docs. La app ahora se llama **Trak** (antes Sway, ver 5.3).
 Fases 1-4 y 2 cerradas y confirmadas por el usuario.
 **Git:** sólo `master`. Repo renombrado a `https://github.com/Locardium/trak` (`origin` ya
 apunta ahí). Todo commiteado; el push lo hace el usuario (al cierre del 2026-10-14 iba a
-pushear). La rama `stable` no existe hasta el primer `pnpm release:win`.
+pushear). La rama `stable` no existe hasta el primer `pnpm release`.
 **Próximo paso (en este orden, actualizado 2026-10-14):**
 1. Probar (usuario):
    - Android: `pnpm dev:android` (app nueva `com.locardium.trak.player.dev`; desinstalar la dev
@@ -20,7 +20,7 @@ pushear). La rama `stable` no existe hasta el primer `pnpm release:win`.
    - Instalador ya probado por el usuario 2026-10-14 (instala en `E:\Programs\Trak`,
      desinstalar con/sin "Delete the application data" OK). El ícono "S" viejo que veía era la
      caché de íconos de Windows (`ie4uinit.exe -show`); el exe tiene el logo.
-2. `pnpm release:win 1.0.0-beta.2` (bumpea, commitea, tag, build win+android+servers,
+2. `pnpm release 1.0.0-beta.2` (antes `release:win`; bumpea, commitea, tag, build win+android+servers,
    `dist/v1.0.0-beta.2/`, `gh release create`, mueve `stable`). Necesita `JAVA_HOME` para el APK.
 3. Server con Docker siguiendo `crates/server/README.md#install` (compila desde `stable`).
    Emparejar de nuevo todos los devices (cambió el contexto del hash del token, 5.3).
@@ -172,6 +172,21 @@ Leyenda: ⬜ pendiente · 🟡 en curso · ✅ hecho y verificado · 🧪 hecho,
 - ✅ 3.1 Normalize satura — −14 LUFS + pico medido + techo −1 dBFS al boostear, hecho 2026-09-25
 - ✅ 3.2 Notificación Android: título/artista + carátula (thumb cacheado), hecho 2026-09-25
 - ✅ 3.3 Stop en la notificación + stop nativo único, hecho 2026-09-25 (botón de la UI sigue chico)
+- 🧪 3.4 (reportado y hecho 2026-10-14, sin commit) Gapless deja silencio entre temas (PC y
+  celu). Causa: el analizador topaba en 12 s el recorte de la cola, y el piso de −60 dB dejaba
+  segundos de fade inaudible (ej. "PASO SOLITA": ~25 s bajo −60 al final). Fix (`loudness.rs`):
+  cola sin tope y con piso −50 dBFS (`TAIL_FLOOR`); inicio sigue en −60 con tope 12 s.
+  `db::migrate` re-mide toda la biblioteca una vez (`ANALYSIS_REV` = 3, setting `analysis_rev`).
+  Usuario confirmó en PC dev 2026-10-14 que con el tope sacado anda; pidió cortar antes (−50),
+  eso falta probarlo. Celu: relanzar `pnpm dev:android`. Detalle en LOG.
+
+- ✅ 3.5 (2026-10-27, confirmado por el usuario) Normalize más fuerte: `TARGET_LUFS` −14 → −10
+  (`crates/core/src/db.rs`). Con normalize ON el trim (knob Gain) queda deshabilitado y no afecta el
+  audio; el valor guardado se conserva. `playback_gain_db` ignora `gain_db` si `normalize`.
+- ✅ 3.4 gapless con piso −50 dB: sin quejas desde 2026-10-14.
+- ✅ 2026-10-27 UI: la última playlist del sidebar queda encima del player (`.tree flex: 1 0 auto`,
+  spacer `.sidebar::after`, `--player-clear` medido por `PlayerBar.tsx`, 0 sin player). El volumen
+  guardado se manda al backend al abrir (`useUiSetting` `onLoad`). Confirmados por el usuario.
 
 ## Fase 4 — Desktop visual / flujo
 - ✅ 4.1 Música aparece en la otra playlist — estado `{id, tracks}` + request counter (2026-09-25)
@@ -189,7 +204,7 @@ Leyenda: ⬜ pendiente · 🟡 en curso · ✅ hecho y verificado · 🧪 hecho,
 Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que debería andar").
 
 ## Fase 5 — Release y docs
-- 🧪 5.1 (hecho 2026-10-13, sin commit, sin correr) `scripts/release-win.js` reescrito: sin
+- 🧪 5.1 (hecho 2026-10-13, sin commit, sin correr) `scripts/release.js` (antes `release-win.js`) reescrito: sin
   la conversión de versión de WiX (NSIS acepta `1.0.0-beta.2`; Tauri usa sólo los números en
   `VIProductVersion`), `cargo update --workspace` tras el bump, build win + android + servers,
   staging en `dist/<tag>/` con nombres fijos (`Trak-setup.exe`, `Trak-portable.exe`,
@@ -199,7 +214,7 @@ Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que deber�
   publica desde el script (no hay Docker acá).
 - 🧪 5.2 (hecho 2026-10-13, sin commit) README raíz: secciones "Install" (instalador,
   portable, APK, datos junto al programa) y "Running the Server" (quickstart Linux + Docker),
-  build:win ya no dice `.msi`, `pnpm release:win`. `crates/server/README.md`: "Quick start on
+  build:win ya no dice `.msi`, `pnpm release`. `crates/server/README.md`: "Quick start on
   Linux", nota de `TRAK_SERVER_TOKEN` al primer arranque, protocolo 3, sección Docker.
   `crates/server/config.example.toml` (generado del template de `config.rs`).
   README corregido contra el código (2026-10-13): −14 LUFS (`db::TARGET_LUFS`) con techo
@@ -262,7 +277,7 @@ Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que deber�
   commit): sin registry ni GitHub Actions (el usuario no los quiere; tiene Docker en el
   server). `docker-compose.yml` compila la imagen EN el server desde
   `https://github.com/Locardium/trak.git#${TRAK_VERSION:-stable}`. La rama `stable` la mueve
-  `release-win.js` (paso 8, `git push --force origin <sha del tag>:refs/heads/stable`, sólo
+  `release.js` (paso 8, `git push --force origin <sha del tag>:refs/heads/stable`, sólo
   tras publicar, sin rollback si falla) → por defecto el server usa el último release;
   `TRAK_VERSION=vX` en `.env` lo fija. Actualizar = `docker compose up -d --build`. `.env`
   sólo necesita `TRAK_SERVER_TOKEN`. `trak-data` hay que crearlo con `chown 10001:10001`
@@ -294,5 +309,5 @@ Fase 4 confirmada por el usuario en desktop 2026-09-29 ("anda todo lo que deber�
 - Sigue instalada en el celu la app vieja `com.sway.app` (0.1.0) — pendiente que el usuario la
   borre, no urgente.
 - Versión: `1.0.0-beta.2` desde 2026-10-13 (app, tauri.conf, server; `bump-version.js` +
-  `cargo update --workspace`). Próximo release: `pnpm release:win 1.0.0-beta.2`. Semver: la
+  `cargo update --workspace`). Próximo release: `pnpm release 1.0.0-beta.2`. Semver: la
   1.0.0 final no salió, así que las betas siguen `1.0.0-beta.N` (no `1.0.1-beta`).

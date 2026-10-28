@@ -26,7 +26,7 @@ I built **Trak** to solve these exact problems. It is a modern, lightweight desk
 * **Safe-by-Design File Integrity**: Your files are sacred. Anything Trak deletes — by you or by a sync — goes to its own trash first and stays there for 30 days (90 on the server) before it's really removed. You'll never accidentally lose a track from your hard drive again.
 * **Real-time P2P Synchronization**: Your PCs and your phone find each other on the local network and sync tracks and playlists directly, device to device (P2P), end-to-end encrypted.
 * **Your Own Backup & Remote Server** (optional): Run a headless server that keeps a backup of every track and playlist from all your devices. It also bridges them: when two devices aren't on the same network, each one syncs with the server and the changes reach the other through it, even if the other one is offline at the time.
-* **Advanced Player & Volume Normalization**: Pre-listen to your sets with seamless crossfades, gapless playback, and smart volume normalization targeting **-14 LUFS** without pushing peaks past -1 dBFS (no more sudden volume jumps between tracks!).
+* **Advanced Player & Volume Normalization**: Pre-listen to your sets with seamless crossfades, gapless playback, and smart volume normalization targeting **-10 LUFS** without pushing peaks past -1 dBFS (no more sudden volume jumps between tracks!).
 
 ---
 
@@ -146,7 +146,7 @@ pnpm install
 - **Publish a Release** (bumps the version, builds everything into `dist/<tag>/`, creates the
   GitHub release):
   ```bash
-  pnpm run release:win 1.0.0-beta.2
+  pnpm release 1.0.0-beta.2
   ```
 
 ---

@@ -33,14 +33,24 @@ use tauri::{AppHandle, Emitter, Manager};
 const BATCH: usize = 32;
 
 /// Anything quieter than this counts as silence when looking for where the
-/// audio starts and ends. -60 dBFS is below the noise floor of any real
-/// recording but well above a true digital zero, so it also catches the
-/// near-silent hiss that encoder padding and vinyl rips leave behind.
+/// audio starts. -60 dBFS is below the noise floor of any real recording but
+/// well above a true digital zero, so it also catches the near-silent hiss
+/// that encoder padding and vinyl rips leave behind.
 const SILENCE_FLOOR: f32 = 0.001; // 10^(-60/20)
 
-/// Never trim more than this from either edge. A track that genuinely opens
+/// The same, for where the audio ends. Higher than the head's: the last
+/// seconds of a fade-out between -50 and -60 dBFS are inaudible in a room and
+/// were heard as the gap. The head stays at -60 so a fade-in keeps its first
+/// notes.
+const TAIL_FLOOR: f32 = 0.003_162; // 10^(-50/20)
+
+/// Never trim more than this from the head. A track that genuinely opens
 /// with a long quiet intro is not padding, and cutting 30 seconds off it
 /// because it starts under the floor would be worse than the gap.
+///
+/// The tail has no cap: past the last sample above `TAIL_FLOOR` there is nothing
+/// left to hear, however long it runs. Capping it too left DJ edits that end
+/// in 25 s of silence playing 13 of them as the gap.
 const MAX_TRIM_MS: i64 = 12_000;
 
 /// What one decode of a file yields.
@@ -102,6 +112,9 @@ pub fn measure(path: &Path) -> Option<Analysis> {
     let mut frames: i64 = 0;
     let mut first_loud: Option<i64> = None;
     let mut last_loud: i64 = 0;
+    // Last frame above `TAIL_FLOOR`. `None` for a track that never gets that
+    // loud: its end falls back to `last_loud` rather than cutting it all.
+    let mut last_tail: Option<i64> = None;
     // Interleaved f32, reused across packets — this is the buffer the meter
     // and the edge scan both read.
     let mut buf: Vec<f32> = Vec::new();
@@ -137,7 +150,7 @@ pub fn measure(path: &Path) -> Option<Analysis> {
         if buf.is_empty() {
             continue;
         }
-        scan_edges(&buf, channels, &mut frames, &mut first_loud, &mut last_loud);
+        scan_edges(&buf, channels, &mut frames, &mut first_loud, &mut last_loud, &mut last_tail);
         meter.as_mut()?.add_frames_f32(&buf).ok()?;
     }
 
@@ -166,8 +179,8 @@ pub fn measure(path: &Path) -> Option<Analysis> {
         None => (0, total_ms),
         Some(first) => {
             let lead = to_ms(first).clamp(0, MAX_TRIM_MS);
-            // The cap applies to how much is cut, not to where the cut is.
-            let trail = to_ms((frames - 1 - last_loud).max(0)).clamp(0, MAX_TRIM_MS);
+            let last = last_tail.unwrap_or(last_loud);
+            let trail = to_ms((frames - 1 - last).max(0));
             (lead, total_ms - trail)
         }
     };
@@ -217,13 +230,18 @@ fn scan_edges(
     frames: &mut i64,
     first_loud: &mut Option<i64>,
     last_loud: &mut i64,
+    last_tail: &mut Option<i64>,
 ) {
     for frame in chunk.chunks_exact(channels) {
-        if frame.iter().any(|s| s.abs() > SILENCE_FLOOR) {
+        let peak = frame.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        if peak > SILENCE_FLOOR {
             if first_loud.is_none() {
                 *first_loud = Some(*frames);
             }
             *last_loud = *frames;
+        }
+        if peak > TAIL_FLOOR {
+            *last_tail = Some(*frames);
         }
         *frames += 1;
     }
@@ -336,6 +354,56 @@ mod tests {
         let _ = std::fs::remove_file(&p);
 
         assert_eq!(a.lead_ms, MAX_TRIM_MS, "should stop at the cap");
+    }
+
+    /// Silence after the last note is all gap, however long: the cap is for
+    /// the head only.
+    #[test]
+    fn a_long_silent_tail_is_trimmed_whole() {
+        let p = tmp("longtail");
+        write_wav(&p, &tone_between_silences(0, 1000, 20_000));
+        let a = measure(&p).expect("measurable");
+        let _ = std::fs::remove_file(&p);
+
+        assert!((a.audio_end_ms - 1000).abs() < 60, "end was {} ms", a.audio_end_ms);
+    }
+
+    /// -55 dBFS square wave: under the tail floor, over the head's.
+    fn hum(ms: u64) -> Vec<i16> {
+        let n = (RATE as u64 * ms / 1000) as usize;
+        (0..n).flat_map(|i| {
+            let v = if (i / 50) % 2 == 0 { 58i16 } else { -58 };
+            [v, v]
+        }).collect()
+    }
+
+    /// The end of a fade-out below -50 dBFS is cut with the silence.
+    #[test]
+    fn a_faded_tail_under_the_tail_floor_is_trimmed() {
+        let p = tmp("fadetail");
+        let mut pcm = tone_between_silences(0, 1000, 0);
+        pcm.extend(hum(3000));
+        write_wav(&p, &pcm);
+        let a = measure(&p).expect("measurable");
+        let _ = std::fs::remove_file(&p);
+
+        assert!((a.audio_end_ms - 1000).abs() < 60, "end was {} ms", a.audio_end_ms);
+    }
+
+    /// A track that never gets louder than the tail floor still plays: its
+    /// end is found with the head's floor instead.
+    #[test]
+    fn a_quiet_track_is_not_cut_to_nothing() {
+        let p = tmp("quiet");
+        let mut pcm = hum(2000);
+        pcm.extend(std::iter::repeat(0i16).take(RATE as usize * 2));
+        write_wav(&p, &pcm);
+        let measured = measure(&p);
+        let _ = std::fs::remove_file(&p);
+        // Too quiet for R128 to gate in: nothing to assert about the ends.
+        let Some(a) = measured else { return };
+
+        assert!((a.audio_end_ms - 2000).abs() < 60, "end was {} ms", a.audio_end_ms);
     }
 }
 

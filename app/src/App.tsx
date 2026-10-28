@@ -160,7 +160,13 @@ export default function App() {
       return isNaN(v) || v < 0 || v > 1 ? null : v;
     },
     (v) => String(v),
-    { legacyKey: VOL_STORAGE, enabled: !isAndroid() },
+    {
+      legacyKey: VOL_STORAGE,
+      enabled: !isAndroid(),
+      // The backend starts at full: tell it the volume that was restored, not
+      // the `1` this state held before the stored value was read.
+      onLoad: (v) => setVolumeBackend(v).catch(() => {}),
+    },
   );
   // Playback preferences live in the backend (the audio thread needs them
   // anyway), and this is the copy the screens read. Defaults match
@@ -215,7 +221,6 @@ export default function App() {
     const attempt = async () => {
       try {
         await Promise.all([refreshLibrary(), refreshPlaylists()]);
-        await setVolumeBackend(volume);
         setPrefs(await getPlaybackPrefs());
       } catch {
         if (tries++ < 5) setTimeout(attempt, 300);
@@ -1443,6 +1448,7 @@ export default function App() {
           onSeek={onSeek}
           onVolume={onVolume}
           onGain={onGain}
+          normalize={prefs.normalize}
           onToggleShuffle={onToggleShuffle}
           onCycleRepeat={onCycleRepeat}
           showVolume={!isAndroid()}

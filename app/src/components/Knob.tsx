@@ -13,6 +13,8 @@ interface Props {
   /// Rendered inside the tooltip and next to the knob.
   format: (v: number) => string;
   onChange: (v: number) => void;
+  /// Shows the value but ignores every input.
+  disabled?: boolean;
 }
 
 /// How far the pointer has to travel, in pixels, to cross the whole range.
@@ -40,8 +42,12 @@ export default function Knob({
   size = 34,
   label,
   format,
-  onChange,
+  onChange: onChangeProp,
+  disabled = false,
 }: Props) {
+  const onChange = (v: number) => {
+    if (!disabled) onChangeProp(v);
+  };
   // Where the drag started, and the value it started from. Deltas are taken
   // against these rather than accumulated per event, so rounding to `step`
   // can't drift over a long drag.
@@ -58,7 +64,7 @@ export default function Knob({
   function onPointerDown(e: React.PointerEvent) {
     // A double-click arrives as a second pointerdown; let it through to the
     // handler below instead of starting a drag that fights it.
-    if (e.detail > 1) return;
+    if (disabled || e.detail > 1) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     drag.current = { y: e.clientY, from: value };
   }
@@ -122,16 +128,21 @@ export default function Knob({
 
   return (
     <div
-      className={'knob' + (atCenter ? '' : ' active')}
+      className={'knob' + (atCenter ? '' : ' active') + (disabled ? ' disabled' : '')}
       style={{ width: size, height: size }}
       role="slider"
-      tabIndex={0}
+      tabIndex={disabled ? -1 : 0}
+      aria-disabled={disabled}
       aria-label={label}
       aria-valuemin={min}
       aria-valuemax={max}
       aria-valuenow={value}
       aria-valuetext={format(value)}
-      title={`${label}: ${format(value)} — drag to adjust, double-click to reset`}
+      title={
+        disabled
+          ? `${label}: ${format(value)} — off while volume normalization is on`
+          : `${label}: ${format(value)} — drag to adjust, double-click to reset`
+      }
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}

@@ -5,6 +5,89 @@
 
 ---
 
+## 2026-10-27 · `release:win` pasa a `release`
+
+- Pedido del usuario: un solo comando de release para todo. `scripts/release-win.js` → `scripts/release.js`,
+  `pnpm release <versión>` (sin alias viejo). Ya construía instalador + portable de Windows, APK, server Windows y
+  Linux (musl) y publica en GitHub; Docker no se construye acá: el server compila desde la rama `stable`, que el
+  script mueve al tag al final. Referencias actualizadas (README, STATUS, PLAN-BETA1). Sin cambios de lógica.
+
+---
+
+## 2026-10-27 · Volumen no se restauraba al reabrir la app
+
+- Bug del usuario: bajar el volumen, cerrar y abrir → el slider queda en lo guardado pero el audio suena al 100%.
+  Causa: el efecto de carga inicial de `App.tsx` mandaba `setVolumeBackend(volume)` con el `1` inicial del estado,
+  antes de que `useUiSetting` leyera el valor guardado. Fix: opción `onLoad` en `uiSettings.ts` (se llama con el valor
+  restaurado) y `App.tsx` la usa para mandarlo al backend; se sacó el envío del efecto inicial.
+  `tsc` pasa. Sin probar en la app. Sin commit.
+
+---
+
+## 2026-10-27 · Normalize volume más fuerte (TARGET_LUFS -14 → -10)
+
+- Pedido del usuario: normalize bajaba demasiado muchos temas (la biblioteca está entre -4 y -8 LUFS,
+  así que con -14 todo se cortaba 6-10 dB). `crates/core/src/db.rs`: `TARGET_LUFS = -10.0`; tests de
+  `playback_gain_db` ajustados a los nuevos números; README dice -10 LUFS.
+- Los boosts siguen limitados por `PEAK_CEILING_DB` (-1 dBFS), así que subir el objetivo no vuelve a
+  saturar (3.1). Si todavía suena bajo: subir a -9/-8 o hacerlo una opción en Settings.
+- No sube `PROTOCOL` (es local, no viaja). `cargo test -p trak-core` pasa. Sin commit. Sin probar de oído.
+- Mismo día, pedido del usuario: con normalize ON el trim (knob Gain) se deshabilita y NO afecta el audio;
+  el valor guardado (`tracks.gain_db`) se conserva y vuelve a aplicar al apagar normalize.
+  `db::playback_gain_db` ignora `gain_db` si `normalize` (tema sin medir = 0 dB). `Knob.tsx` prop `disabled`,
+  `PlayerBar.tsx` prop `normalize`, `App.tsx` pasa `prefs.normalize`, `styles.css` `.knob.disabled`.
+  Tests de `playback_gain_db` actualizados. `cargo test -p trak-core` y `tsc` pasan. Sin probar en la app.
+
+- Mismo día: con muchas playlists en el sidebar las últimas filas quedaban tapadas por el player flotante.
+  Causa probable: `--player-clear` (96px / 148px en `styles.css`) era menor que el alto real del player
+  (título de 2 líneas + inset). Fix: `PlayerBar.tsx` mide el footer con ResizeObserver y setea
+  `--player-clear` en `:root` (alto + bottom + 12px); al desmontar lo borra y vuelve el valor del CSS.
+  `tsc` pasa. Sin probar en la app (no se vio el scroll real: si sigue tapando, medir el alto del footer en DevTools).
+  El usuario reportó que seguía sin verse la última playlist: el `padding-bottom` del `.sidebar` (flex column con
+  scroll) no se cuenta en el alto scrolleable. Ahora es un spacer `.sidebar::after { height: var(--player-clear) }`
+  (`styles.css`). `.table-wrap` (bloque) sigue con padding. Sin probar.
+  Seguía sin scrollear: causa real = `.tree` era `flex: 1` (basis 0) → caja del alto sobrante y su contenido
+  desbordaba sin agrandar el scroll del sidebar (quedaba bajo el player y no había scroll). Fix: `.tree { flex: 1 0 auto }`
+  para que mida su contenido y spacer/padding sumen al scroll. Sin probar.
+  Confirmado por el usuario que ya se ve. Pedido: sin player no debe haber scroll de más → `--player-clear` default
+  `0px` (se quitó el 96/148px del CSS; `PlayerBar.tsx` lo setea mientras está montado); toast y right-panel usan
+  `max(var(--player-clear), var(--player-inset))` para no pegarse al borde. Sin probar.
+
+---
+
+## 2026-10-14 · 3.4 Gapless deja silencio entre temas
+
+- Reporte: silencio entre temas con gapless, en PC y Android.
+- Diagnóstico con la DB real (`E:\Programs\Trak\db.sqlite`, copiada a temp) + niveles de los WAV
+  (script Python con `wave`, pico por ventana): "2 - PASO SOLITA…" tenía
+  `duration_ms - audio_end_ms` = 12000 exacto = `MAX_TRIM_MS`. El archivo cae bajo −60 dBFS
+  ~25 s antes del final (−48 a 29 s, −60 a 25 s, −87 al final) → con el tope se tocaban ~13 s
+  de silencio. Los otros dos temas no tenían cola larga. Ambas plataformas usan los mismos
+  números (`cue_for` desktop, `cue_for_track` → Media3 `ClippingConfiguration`), por eso falla
+  en las dos. El mecanismo de encadenado (rodio `Sink` append / playlist de ExoPlayer) estaba
+  bien: no se tocó.
+- Fix: `app/src-tauri/src/loudness.rs` — `MAX_TRIM_MS` sólo para el inicio (una intro tranquila
+  es música); la cola se recorta entera. `crates/core/src/db.rs` — en `migrate`, una sola vez
+  (setting local `analysis_rev`), se borran las mediciones de filas con
+  `duration_ms - audio_end_ms >= 11000` para que el sweep las re-mida. Sin marca se re-medirían
+  en cada arranque (una cola de 25 s sigue cumpliendo la condición).
+- Tests: `loudness::tests::a_long_silent_tail_is_trimmed_whole`,
+  `db::tests::tails_cut_at_the_old_cap_are_remeasured_once`. `cargo test -p trak-core` y
+  `cargo test --lib loudness` (en `app/src-tauri`) OK. Sin probar escuchando.
+- Usuario probó en PC dev (`target/app-dev`, ya tenía `analysis_rev=2`): "sí funcionó", pero
+  pidió cortar antes, a −50. Antes de eso se verificó que el encadenado de rodio no mete hueco:
+  test descartable con `Sink::new_idle()` + los WAV reales, PASO SOLITA → COQUETA, el formato
+  cambia 44.1k→48k justo en el borde sin samples de silencio. El silencio que quedaba era el
+  fade del propio tema (−40 a −60 dB los últimos ~9 s antes del corte).
+- Segundo cambio: `TAIL_FLOOR` = −50 dBFS sólo para el final (`scan_edges` lleva `last_tail`
+  aparte); el inicio sigue en −60 para no comer fade-ins. Si un tema nunca pasa de −50, el final
+  cae al de −60 (no se corta entero). Migración reescrita: `ANALYSIS_REV` = 3 en `db.rs`; si
+  `analysis_rev` guardado < 3 → `clear_analysis` (re-mide TODA la biblioteca una vez; en el celu
+  tarda minutos, con notificación). Para el próximo cambio del analizador: subir `ANALYSIS_REV`.
+- Tests nuevos: `a_faded_tail_under_the_tail_floor_is_trimmed`,
+  `a_quiet_track_is_not_cut_to_nothing`, `db::tests::measurements_from_an_older_analyzer_are_redone_once`
+  (reemplaza al de la migración por tope). `cargo test -p trak-core` y `cargo test --lib loudness` OK.
+
 ## 2026-10-14 · Ícono de la app: logo de Trak
 
 - El usuario dejó `app/src-tauri/icons/trak-logo.png` (2000×2000, cuadrado oscuro redondeado
