@@ -68,8 +68,26 @@ fn backup_if_foreign(target: &Path) -> Result<()> {
         let ts = export_xml::compact_timestamp(SystemTime::now());
         dir.join(format!("{stem}.bak-{ts}.{ext}"))
     };
-    std::fs::rename(target, &backup_path)?;
+    // Copy, don't rename: the original must stay at `target` until the new
+    // file is ready, so a failed write never leaves iTunes without a library.
+    std::fs::copy(target, &backup_path)?;
     Ok(())
+}
+
+/// Writes to a temp file in the same folder and then renames it over
+/// `target`, so `target` is always either the old or the new full file.
+fn write_atomic(target: &Path, contents: &str) -> Result<()> {
+    let dir = target.parent().unwrap_or_else(|| Path::new("."));
+    let name = target
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("iTunes Music Library.xml");
+    let tmp = dir.join(format!("{name}.trak-tmp"));
+    let result = std::fs::write(&tmp, contents).and_then(|_| std::fs::rename(&tmp, target));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(result?)
 }
 
 /// Generates + backs up if needed + writes. Shared path used by the manual
@@ -78,7 +96,7 @@ pub fn write_now(app: &AppHandle, conn: &Connection, music_dir: &Path) -> Result
     let xml = export_xml::generate_xml(conn, music_dir)?;
     let target = itunes_library_path(app)?;
     backup_if_foreign(&target)?;
-    std::fs::write(&target, xml)?;
+    write_atomic(&target, &xml)?;
     Ok(())
 }
 
@@ -127,14 +145,38 @@ mod tests {
     }
 
     #[test]
-    fn backup_renames_in_place_when_foreign() {
+    fn backup_copies_in_place_when_foreign() {
         let dir = tmp_dir("foreign");
         let target = dir.join("iTunes Music Library.xml");
-        std::fs::write(&target, "<plist><key>Application Version</key><string>12.13.10.3</string></plist>").unwrap();
+        let foreign = "<plist><key>Application Version</key><string>12.13.10.3</string></plist>";
+        std::fs::write(&target, foreign).unwrap();
         backup_if_foreign(&target).unwrap();
-        assert!(!target.exists(), "the original was renamed, it must not still be at the original path");
-        let renamed = dir.join("iTunes Music Library.original.xml");
-        assert!(renamed.exists());
+        assert!(target.exists(), "the original must stay until the new file replaces it");
+        let backup = dir.join("iTunes Music Library.original.xml");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), foreign);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_atomic_replaces_target_and_leaves_no_temp() {
+        let dir = tmp_dir("atomic");
+        let target = dir.join("iTunes Music Library.xml");
+        std::fs::write(&target, "old").unwrap();
+        write_atomic(&target, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert!(!dir.join("iTunes Music Library.xml.trak-tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_atomic_failure_keeps_old_target() {
+        let dir = tmp_dir("atomic-fail");
+        let target = dir.join("iTunes Music Library.xml");
+        std::fs::write(&target, "old").unwrap();
+        // A directory squatting on the temp name makes the write fail.
+        std::fs::create_dir(dir.join("iTunes Music Library.xml.trak-tmp")).unwrap();
+        assert!(write_atomic(&target, "new").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
