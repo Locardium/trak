@@ -504,10 +504,13 @@ footer.player.closing { animation: player-out 220ms var(--ease) forwards; }
   .art-stop {
     opacity: 1;
     inset: auto -2px -2px auto;
-    width: 20px; height: 20px; border-radius: 50%;
+    /* min-height: the global `button` rule sets --control-h, which would stretch
+       this badge into an oval taller than its 20px width. */
+    width: 20px; height: 20px; min-height: 0; border-radius: 50%;
     background: var(--panel-2);
     border: 1px solid var(--line);
   }
+  .art-stop svg { width: 9px; height: 9px; }
 }
 .np-text { display: flex; flex-direction: column; min-width: 0; }
 /* Wrap instead of truncating to nothing: the title gets two lines, the artist one. */

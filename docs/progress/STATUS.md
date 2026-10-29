@@ -34,6 +34,10 @@ pushear). La rama `stable` no existe hasta el primer `pnpm release`.
   el próximo release (sin bump de protocolo). Detalle en LOG. Revisión de `db.rs`, `app/src-tauri/src`
   y front pendiente.
 
+- 🧪 Android (2026-10-29): escala de UI para pantallas con "tamaño de pantalla" chico (`platform.ts`
+  + `useWideViewPort` en `MainActivity.kt`), versión real en Settings, botón stop en touch. El usuario
+  aún la ve igual: probar con `pnpm dev:android` recompilado; si no, `setInitialScale`. Ver LOG.
+
 Antes de cada commit: `gen/android/app/build.gradle.kts` sale `w/mixed` por el CLI de Tauri →
 `git checkout` de ese archivo.
 

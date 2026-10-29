@@ -57,6 +57,9 @@ class MainActivity : TauriActivity() {
         webView.settings.setSupportZoom(false)
         webView.settings.builtInZoomControls = false
         webView.settings.displayZoomControls = false
+        // Sin esto el WebView ignora el `width=` del meta viewport, y la escala que
+        // aplica `applyAndroidScale` (app/src/platform.ts) no tiene ningun efecto.
+        webView.settings.useWideViewPort = true
     }
 
     /// Sin esto, el descubrimiento mDNS del sync (Fase 5.1) no recibe NADA.

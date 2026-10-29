@@ -5,6 +5,26 @@
 
 ---
 
+## 2026-10-29 · Android: escala de la UI, versión en Settings, botón stop (sin probar en device)
+
+- Settings > About mostraba "1.0.0" fijo: ahora `getVersion()` (`Settings.tsx`) → `1.0.0-beta.2`.
+- Escala en Android (`platform.ts` `applyAndroidScale`, llamada desde `main.tsx`): con "tamaño de
+  pantalla" chico del sistema la UI en px queda diminuta. Se agranda `(ancho_css/390)^0.6`, tope 1.35,
+  vía meta viewport (`width=ancho/escala`). **CSS `zoom` NO sirve**: deja el layout más ancho que la
+  pantalla (menús y lista se salen por la derecha). Datos del S24 del usuario: 1080 px, densidad 314
+  (default 450) → ~550 px CSS → escala ~1.23.
+- El WebView ignora el `width=` del meta viewport sin `useWideViewPort`: se activó en
+  `MainActivity.kt` (`onWebViewCreate`). Cambio Kotlin: hay que cortar y relanzar `pnpm dev:android`.
+  **El usuario seguía viéndolo igual tras el primer intento: no confirmado que ande.** Si no, siguiente
+  paso: `webView.setInitialScale(...)` en Kotlin, que no depende del meta.
+- Botón stop (badge circular sobre la carátula en touch, `.art-stop`): la regla global `button`
+  pone `min-height: var(--control-h)` y estiraba el badge a óvalo; `min-height: 0` + ícono 9px.
+- `xml_sync.rs` (cambio previo de otro chat, entra en este commit aparte): el backup del XML ajeno
+  ahora copia en vez de renombrar y la escritura es atómica (tmp + rename).
+- `gen/android/app/build.gradle.kts` sale modificado por el CLI de Tauri: NO se commitea.
+
+---
+
 ## 2026-10-28 · Seguridad: path traversal al recibir archivos (security-review de core + server)
 
 - Hallazgo (alta): `filename` (de `Msg::BlobPush` y del manifest remoto) y `hash` los manda el peer y

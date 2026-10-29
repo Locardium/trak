@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
+import { getVersion } from '@tauri-apps/api/app';
 import { ChevronRight } from 'lucide-react';
 import { Modal } from './Modal';
 import { Switch } from './Switch';
@@ -77,6 +78,10 @@ export default function Settings({
 }: Props) {
   const [autoSyncXml, setAutoSyncXmlState] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [appVersion, setAppVersion] = useState('');
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => {});
+  }, []);
   const [importing, setImporting] = useState(false);
   const [devices, setDevices] = useState<string[]>([]);
   /// Tracks still waiting on the analyzer. `null` = not asked yet.
@@ -417,7 +422,7 @@ export default function Settings({
           <h4>About</h4>
           <div className="set-row">
             <div className="set-label"><span>Version</span></div>
-            <span className="set-value">1.0.0</span>
+            <span className="set-value">{appVersion}</span>
           </div>
           {/* <p className="set-note">
             Trak — a DJ library manager. Current output volume {Math.round(volume * 100)}%.
